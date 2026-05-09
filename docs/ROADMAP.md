@@ -114,21 +114,31 @@ TUI с заголовком и статичной таблицей, стрелк
 
 ### Задачи
 
-- [ ] Структура `App { backends: Vec<Backend>, table_state: TableState, ... }`
-- [ ] Фоновая `tokio::spawn`-задача опрашивает БД раз в секунду
-- [ ] Передача `Vec<Backend>` через `tokio::sync::watch::channel` (нужно только последнее значение)
-- [ ] Главный loop: `tokio::select!` между tick (60 fps), input event, обновлением данных
-- [ ] Перерисовка по событию или таймеру, не каждый кадр без причины
-- [ ] Стрелки двигают выделение реальных бэкендов
-- [ ] `Enter` пока ничего не делает (заглушка)
-- [ ] Graceful shutdown через `tokio_util::sync::CancellationToken`
+- [x] Структура `App { backends: Vec<Backend>, table_state: TableState, ... }`
+- [x] Фоновая `tokio::spawn`-задача опрашивает БД раз в секунду
+- [x] Передача `Vec<Backend>` через `tokio::sync::watch::channel` (нужно только последнее значение)
+- [x] Главный loop: `tokio::select!` между tick (60 fps), input event, обновлением данных
+- [x] Перерисовка по событию или таймеру, не каждый кадр без причины
+- [x] Стрелки двигают выделение реальных бэкендов
+- [x] `Enter` пока ничего не делает (заглушка)
+- [x] Graceful shutdown через `tokio_util::sync::CancellationToken`
 
 ### Чему учусь
 
-- `tokio::select!` и его подводные камни (cancellation safety)
-- Разница между mpsc / watch / broadcast — почему здесь `watch`
-- Graceful shutdown паттерн в async Rust
-- Ownership при шеринге state между задачами: message passing > `Arc<Mutex<>>`
+- **`tokio::sync::watch` — latest-wins канал.** Sender хранит ровно одно значение, при `send` оно заменяется. Receiver видит обновления через `.changed().await` (cancel-safe) и читает через `.borrow()` или `.borrow_and_update()`. Идеально для мониторинга: «свежее всегда лучше старого».
+- **Сравнение каналов.** `mpsc` накапливает историю — для UI получился бы лаг. `broadcast` — много подписчиков с буфером, тоже лишнее. `watch` — один писатель, много читателей, без буферизации. `Arc<Mutex<Vec<Backend>>>` — без built-in нотификации, придётся будить через Notify, плюс риск hold lock через .await (deadlock).
+- **`Ref<T>` нельзя держать через `.await`.** `borrow_and_update()` возвращает `Ref` (как `RwLockReadGuard`); если задержать через async-yield, заблокируешь Sender. Паттерн — сразу `.clone()` и отпустить.
+- **`CancellationToken` (`tokio_util`)** — shared cancel-флаг с нотификацией. `clone()` шарит underlying state (Arc внутри); `.cancel()` идемпотентен и необратим; `.cancelled()` cancel-safe для select!. Лучше чем Notify (нет «уже cancelled?» state) и лучше чем oneshot (одноразовый, неудобно делить).
+- **`biased;` в `select!`.** По умолчанию tokio случайно перемешивает порядок веток для fairness. Для cancellation это плохо: cancel может «пропустить ход». `biased;` фиксирует порядок на декларационный — критично для shutdown'а.
+- **Nested `select!` для cancellation in-flight операции.** Ветка `tokio::select! { _ = cancel.cancelled() => break, r = fetch_backends(...) => r }` позволяет дропнуть fetch на cancel. `tokio_postgres::Client::query` cancel-safe: drop future оставляет соединение в нормальном состоянии (серверный запрос продолжит выполняться, ответ ignored).
+- **Spawn + JoinHandle для синхронизации завершения.** До Phase 3 `tokio::spawn` без сохранения handle = «фоновая задача без явного завершения», runtime аборт'ит на shutdown. Сохранение handle и `.await` даёт *гарантию* «таска действительно завершилась».
+- **Сигнал «UI ушёл» через `tx.send(...).is_err()`.** Естественный double-check к CancellationToken: если все Receiver'ы дропнуты, send fails — collector выходит сам, даже без явного cancel. На shutdown оба пути сходятся к одному.
+- **Один `now` на кадр.** В `render_table` считаем `Utc::now()` один раз и передаём в каждый `backend_to_row` — иначе разные строки показывали бы duration от микро-разных моментов времени.
+- **Auto-clamp выделения в `set_backends`.** Если collector прислал список короче, селекшен мог уйти за len; если стал пустым — селекшен должен стать None. Инвариант после `set_backends`: selected либо None (пустая таблица), либо валидный индекс.
+- **Drop ordering для UX.** Явный `drop(term)` после `run_event_loop` восстанавливает терминал ДО shutdown'а collector'а — пользователь сразу возвращается к shell, не смотрит замороженный кадр пока ждём JoinHandle.
+- **`#[allow(dead_code)]` на структуре vs полях.** Backend моделирует всю SELECT-выборку из `pg_stat_activity`; не все поля сейчас отрисовываются, но все populated одинаково — так что allow на структуре, а не на каждом неиспользуемом поле. Снимется само, когда подключим detail view (Phase 4).
+- **Метод-заглушка как extension point.** `App::on_enter()` сейчас no-op, но это уже финальная форма для main: Phase 4 правит только тело метода, не event loop. Лучше чем `KeyCode::Enter => {}` inline в main.
+- **Module split раньше необходимости.** Создал `collectors.rs` для одного collector'а — выглядит overkill, но Phase 5 явно зовёт разделять (`activity`, `locks`, `top_queries`, `replication`). Заранее обозначить границу легче, чем потом резать `db.rs` пополам.
 
 ### Деливерабл
 

@@ -3,16 +3,16 @@ use std::env;
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
 use futures::StreamExt;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 mod app;
-// db-модуль на Phase 2 практически не используется (только `connect` для smoke
-// test'а связи). Полноценный поток данных вернётся в Phase 3 через watch-канал;
-// до тех пор подавляем dead_code, чтобы clippy не валился на fetch_backends/Backend.
-#[allow(dead_code)]
+mod collectors;
 mod db;
 mod ui;
 
 use app::App;
+use db::Backend;
 
 const DEFAULT_DSN: &str = "postgres://pgtop:pgtop@localhost:5433/pgtop";
 
@@ -20,60 +20,89 @@ const DEFAULT_DSN: &str = "postgres://pgtop:pgtop@localhost:5433/pgtop";
 async fn main() -> Result<()> {
     color_eyre::install()?;
 
-    // Phase 2: TUI владеет stdout/stderr внутри alternate screen — обычный
-    // tracing-логгер «протекал бы» поверх кадра. tracing вернётся в Phase 7
-    // через `tracing-appender` в файл.
-    //
-    // db::connect остаётся как smoke-test связи (наследие Phase 1). Фоновая
-    // connection-таска тихо живёт до выхода процесса; в Phase 3 заведём
-    // поток данных через watch::channel.
+    // Phase 3: TUI владеет stdout/stderr внутри alternate screen. tracing
+    // вернётся в Phase 7 через `tracing-appender` в файл.
+
     let dsn = env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DSN.to_string());
-    let _client = db::connect(&dsn).await?;
+    let client = db::connect(&dsn).await?;
+
+    // watch::channel(initial) — latest-wins канал. Sender хранит ровно одно
+    // значение, при `send` оно заменяется; Receiver-ы видят новую версию через
+    // `.changed().await`. Идеально для мониторинга: UI'у нужен только свежий
+    // снапшот, история не интересует.
+    //
+    // Initial value — пустой Vec: до первого тика collector'а UI рисует пустую
+    // таблицу. Первый tick происходит сразу (interval так устроен), задержка
+    // до первого реального снапшота = одно сетевое RTT к БД.
+    let (data_tx, data_rx) = watch::channel::<Vec<Backend>>(Vec::new());
+
+    // CancellationToken — shared cancel-флаг с нотификацией. clone() шарит
+    // underlying state (внутри Arc<...>); cancel с любого клона видят все.
+    // main держит оригинал, collector — клон; на shutdown main зовёт cancel,
+    // collector видит на ближайшей `.cancelled()` await-точке и завершается.
+    let cancel = CancellationToken::new();
+
+    // Сохраняем JoinHandle, чтобы дождаться реального завершения collector'а
+    // на shutdown'е (а не просто понадеяться на runtime-abort).
+    let collector_handle = tokio::spawn(collectors::run_activity_collector(
+        client,
+        data_tx,
+        cancel.clone(),
+    ));
 
     let mut app = App::new();
-    // TerminalGuard — RAII: при выходе из main (через Ok, через ?-ошибку
-    // или через unwinding-панику) Drop вернёт TTY в нормальный режим
-    // автоматически. Явный restore_terminal больше не нужен.
     let mut term = ui::TerminalGuard::new()?;
+    let loop_result = run_event_loop(term.terminal(), &mut app, data_rx).await;
 
-    run_event_loop(term.terminal(), &mut app).await
+    // Восстанавливаем терминал ДО shutdown'а collector'а: иначе пользователь
+    // видит замороженный кадр пока мы ждём завершение фоновой таски (~до 1с).
+    // `drop(term)` явно вызывает Drop, который снимет alt-screen + raw mode.
+    drop(term);
+
+    // Просим collector завершиться. Он проснётся на ближайшей
+    // `cancel.cancelled()` ветке в своих `select!` и вернётся.
+    cancel.cancel();
+
+    // Ждём, что collector действительно завершился. JoinHandle::await отдаёт
+    // `Result<(), JoinError>`: Err только при панике в таске. Игнорируем
+    // (panic-hook уже отрисовал бы), главное — синхронизация на завершении.
+    let _ = collector_handle.await;
+
+    loop_result
 }
 
 /// Async event loop: render → ждём первое событие → реагируем → повторяем.
 ///
-/// Что в `tokio::select!`:
-/// - `events.next()` — следующий `Event` от crossterm. `Event` — это enum:
-///   `Key(KeyEvent) | Mouse(...) | Resize(u16, u16) | Paste(String) |
-///   FocusGained | FocusLost`.
-/// - `signal::ctrl_c()` — то же поведение, что в Phase 1: ловим SIGINT
-///   независимо от того, отжата ли клавиша Ctrl+C в терминале.
+/// Три ветки `select!`:
+/// - `events.next()` — клавиатура, ресайз, мышь.
+/// - `data_rx.changed()` — collector прислал свежий snapshot.
+/// - `signal::ctrl_c()` — SIGINT.
 ///
-/// Хоткеи task 3-5: `q` / `Esc` → выход; стрелки `↑`/`↓` двигают выделение.
-/// Остальные клавиши не-выходные — task 4 (Phase 4) добавит сортировку (`s`),
-/// фильтр (`/`) и т.д.
-async fn run_event_loop(terminal: &mut ui::Tui, app: &mut App) -> Result<()> {
-    // EventStream создаётся ОДИН раз: внутри он держит поток-поллер
-    // и канал событий. Пересоздавать в loop = терять буферизованные
-    // события и платить за spawn потока на каждой итерации.
+/// Все cancel-safe (см. tokio-доку для каждого). Render вверху loop'а
+/// перерисовывает кадр по событию любого типа: на любую клавишу или новый
+/// snapshot UI обновляется сразу. Никаких 60fps-tick'ов: render строго по
+/// причине, ratatui-diff делает no-op-кадры дешёвыми.
+async fn run_event_loop(
+    terminal: &mut ui::Tui,
+    app: &mut App,
+    mut data_rx: watch::Receiver<Vec<Backend>>,
+) -> Result<()> {
     let mut events = EventStream::new();
 
     loop {
-        // Closure `|frame| ui::render(frame, app)` реборроу-ет `*app` на время
-        // draw'а; после возврата borrow заканчивается, и app снова доступен
-        // в match-ветках ниже. Реборроу — автоматическое поведение Rust для
-        // mut-references в captures.
         terminal.draw(|frame| ui::render(frame, app))?;
 
         tokio::select! {
+            // Гард `kind == Press` отсекает дубликаты на терминалах
+            // с kitty keyboard protocol.
             maybe_event = events.next() => {
                 match maybe_event {
-                    // Гард `kind == Press` отсекает дубликаты на терминалах
-                    // с kitty keyboard protocol (см. task 3).
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                             KeyCode::Up => app.select_previous(),
                             KeyCode::Down => app.select_next(),
+                            KeyCode::Enter => app.on_enter(),
                             _ => {}
                         }
                     }
@@ -82,6 +111,27 @@ async fn run_event_loop(terminal: &mut ui::Tui, app: &mut App) -> Result<()> {
                     None => return Ok(()),
                 }
             }
+
+            // `.changed()` резолвится при увеличении внутренней версии (т.е.
+            // collector сделал send). Cancel-safe: версия отслеживается на
+            // стороне Receiver'а, дроп future не теряет «уже видел/не видел».
+            //
+            // `Err(_)` — все Sender'ы закрыты (collector упал/завершился).
+            // На Phase 3 — просто выходим из UI; в block B будет аккуратнее.
+            res = data_rx.changed() => {
+                match res {
+                    Ok(()) => {
+                        // `borrow_and_update()` отдаёт `Ref<Vec<Backend>>` и
+                        // помечает «эту версию я видел». Клонируем содержимое,
+                        // потому что хотим владеть им в App (и `Ref` нельзя
+                        // держать через .await).
+                        let snapshot = data_rx.borrow_and_update().clone();
+                        app.set_backends(snapshot);
+                    }
+                    Err(_) => return Ok(()),
+                }
+            }
+
             _ = tokio::signal::ctrl_c() => return Ok(()),
         }
     }

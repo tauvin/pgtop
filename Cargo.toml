@@ -18,7 +18,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 color-eyre = "0.6"
-tabled = "0.16"
+tokio-util = "0.7"
 
 [dev-dependencies]
 # cargo-husky прописывает git pre-commit hook в .git/hooks/ при сборке dev-профиля

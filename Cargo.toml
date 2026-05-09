@@ -1,0 +1,21 @@
+[package]
+name = "pgtop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = "0.7"
+ratatui = "0.30"
+crossterm = "0.29"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+color-eyre = "0.6"
+
+[profile.release]
+lto = "thin"

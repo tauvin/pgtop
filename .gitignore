@@ -1,0 +1,14 @@
+# rust
+/target
+
+# IDE (RustRover / IntelliJ)
+.idea/
+
+# logs
+*.log
+
+# secrets / local env
+.env
+
+# claude per-machine settings
+.claude/settings.local.json

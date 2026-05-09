@@ -75,20 +75,32 @@
 
 ### Задачи
 
-- [ ] ratatui hello world: alternate screen, raw mode, пустой `Block` с заголовком
-- [ ] Event loop через `crossterm::event::EventStream` (async-friendly)
-- [ ] Хоткеи: `q` и `Esc` для выхода
-- [ ] Статичная таблица с захардкоженными данными
-- [ ] Виджет `Table` + `TableState` для выделения строки стрелками
-- [ ] Footer с подсказками хоткеев
-- [ ] Drop-обёртка, корректно восстанавливающая терминал даже при панике (panic hook + Drop guard)
+- [x] ratatui hello world: alternate screen, raw mode, пустой `Block` с заголовком
+- [x] Event loop через `crossterm::event::EventStream` (async-friendly)
+- [x] Хоткеи: `q` и `Esc` для выхода
+- [x] Статичная таблица с захардкоженными данными
+- [x] Виджет `Table` + `TableState` для выделения строки стрелками
+- [x] Footer с подсказками хоткеев
+- [x] Drop-обёртка, корректно восстанавливающая терминал даже при панике (panic hook + Drop guard)
 
 ### Чему учусь
 
-- Архитектура TUI-приложения
-- Event loop в async-контексте
-- Разница между immediate-mode и retained-mode UI (ratatui — immediate)
-- RAII и `Drop` в Rust на практическом примере
+- **Immediate-mode UI**: state живёт у меня (в `App`), виджеты — эфемерные value-объекты, конструируются на каждом кадре. Это не React/GTK с retained-tree; ближе к SwiftUI/Compose.
+- **Buffer + diff в ratatui**: каждый `terminal.draw(...)` рисует в `Buffer`, ratatui считает разницу с предыдущим кадром и шлёт в backend только изменения — отсюда дешёвая перерисовка.
+- **Layout — pure function**: `Layout::vertical([...]).areas::<N>(rect)` возвращает `[Rect; N]` без какого-либо state. На ресайз ничего не настраиваем — следующий кадр просто решит уравнение под новый `frame.area()`.
+- **`.areas::<N>()` vs `.split()`**: с фиксированным массивом и destructuring `let [a, b] = ...` компилятор проверит совпадение числа constraint'ов.
+- **Stateful widgets**: `Table` сам stateless, `TableState` хранит `selected`+`offset` между кадрами. Рендер через `render_stateful_widget(widget, area, &mut state)` — ratatui читает state и может его мутировать (например, подвинуть offset под выделение).
+- **Span/Line/Text — три уровня rich text**. `Stylize`-трейт даёт builder-методы прямо на `&str`/`Span`/`Style`: `"q".bold()`, `Style::new().dim()` — без него пришлось бы писать длинный `Span::styled(...)`.
+- **`Paragraph::style(...)` мерджится со стилями Span'ов**, не заменяет. Идеально для footer'а: общий dim как фон + отдельные bold-куски на хоткеях.
+- **`crossterm::event::EventStream`** — async-обёртка над sync `read()`. Под капотом — фоновый поллер (тред / IOCP) + канал. Cancel-safe для `select!`, но **не recreate-safe**: создавать ОДИН раз перед loop'ом, иначе теряются буферизованные события.
+- **`KeyEventKind::Press`-фильтр**: на терминалах с kitty keyboard protocol (WezTerm, Kitty, Foot с CSI u) одна клавиша = Press + Release + Repeat. Без фильтра `q` срабатывал бы дважды.
+- **Match-гарды и or-patterns** делают код хоткеев компактным: `Some(Ok(Event::Key(key))) if key.kind == Press`, `KeyCode::Char('q') | KeyCode::Esc`. Когда гард ложный — match идёт к следующей ветке, как будто pattern не совпал.
+- **`tokio::select!` ≠ `Promise.race`**: проигравшие Future дропаются — отсюда понятие cancellation safety. На практике: `EventStream::next` и `signal::ctrl_c()` обе cancel-safe; долгие операции внутри ветки уже не прерываются (фаза 3 — обернём в `CancellationToken`).
+- **RAII в Rust = Drop**: запускается на конце scope'а — нормальный `return`, ранний `?`, panic-unwinding. Даёт «using/with»-семантику без `try/finally`.
+- **Drop + panic hook оба нужны**. Hook вызывается **до** unwinding'а и Drop'ов. Если hook напечатает стек панике, пока терминал в alt-screen — стек уйдёт в alt-screen и пропадёт. Поэтому hook **тоже** делает cleanup, а Drop остаётся как страховка для штатного выхода. Идемпотентность операций (`LeaveAlternateScreen`, `disable_raw_mode`) делает двойной вызов безвредным.
+- **`panic = "abort"` отключает Drop**, поэтому panic hook нельзя выкидывать как «дублирующий» — он остаётся последним рубежом.
+- **Реборроу `&mut` в closure**: `terminal.draw(|frame| render(frame, app))` — closure захватывает `app: &mut App` и реборроу-ет `*app` на время вызова. После возврата borrow заканчивается, `app` снова доступен.
+- **`#[rustfmt::skip]` на функции** — стандартный приём для табличных литералов и ASCII-art, чтобы rustfmt не разбивал строки на multi-line и не ломал колоночное выравнивание.
 
 ### Деливерабл
 

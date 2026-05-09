@@ -1,87 +1,88 @@
 use std::env;
 
 use color_eyre::eyre::Result;
-use tabled::{Table, settings::Style};
-use tokio::time::{Duration, MissedTickBehavior};
-use tracing_subscriber::EnvFilter;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
+use futures::StreamExt;
 
+mod app;
+// db-модуль на Phase 2 практически не используется (только `connect` для smoke
+// test'а связи). Полноценный поток данных вернётся в Phase 3 через watch-канал;
+// до тех пор подавляем dead_code, чтобы clippy не валился на fetch_backends/Backend.
+#[allow(dead_code)]
 mod db;
+mod ui;
+
+use app::App;
 
 const DEFAULT_DSN: &str = "postgres://pgtop:pgtop@localhost:5433/pgtop";
 
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
 
+    // Phase 2: TUI владеет stdout/stderr внутри alternate screen — обычный
+    // tracing-логгер «протекал бы» поверх кадра. tracing вернётся в Phase 7
+    // через `tracing-appender` в файл.
+    //
+    // db::connect остаётся как smoke-test связи (наследие Phase 1). Фоновая
+    // connection-таска тихо живёт до выхода процесса; в Phase 3 заведём
+    // поток данных через watch::channel.
     let dsn = env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DSN.to_string());
-    let client = db::connect(&dsn).await?;
+    let _client = db::connect(&dsn).await?;
 
-    // tokio::time::interval vs sleep — почему здесь interval:
-    //
-    // - `sleep(1s)` внутри loop даёт цикл длиной (работа + 1s), без выравнивания.
-    //   Если fetch занимает 200ms — реальный период 1.2s; если БД лагает на 800ms —
-    //   1.8s. Дрейф накапливается линейно: за час «секундный» цикл может проскочить
-    //   на десятки тиков.
-    //
-    // - `interval` хранит внутри расписание тиков и сама ждёт ровно столько,
-    //   чтобы `tick().await` проснулся в назначенный момент. Если работа уложилась
-    //   в период — следующий тик ровно через секунду от старта предыдущего.
-    //
-    // Что делать, когда работа дольше периода — настраивается MissedTickBehavior:
-    //
-    // - Burst (default): по возвращении выстреливает все пропущенные тики подряд
-    //   без пауз. Для мониторинга катастрофично — после лагающего fetch'а получим
-    //   бэрст fetch'ей подряд и сами же добавим нагрузки.
-    // - Skip: пропущенные тики выкидываются, следующий — на ближайшем «слоте»
-    //   расписания от старта. Расписание сохраняет абсолютную фазу.
-    // - Delay: расписание сдвигается — следующий тик ровно через period после того,
-    //   как `tick().await` вернётся. Фаза «плывёт», но расстояние между фактическими
-    //   тиками стабильно ≥ period.
-    //
-    // Для опроса БД важно ≥1с между запросами; абсолютная фаза не нужна → Delay.
-    let mut ticker = tokio::time::interval(Duration::from_secs(1));
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut app = App::new();
+    // TerminalGuard — RAII: при выходе из main (через Ok, через ?-ошибку
+    // или через unwinding-панику) Drop вернёт TTY в нормальный режим
+    // автоматически. Явный restore_terminal больше не нужен.
+    let mut term = ui::TerminalGuard::new()?;
 
-    // tokio::select! гоняет несколько Future параллельно и заходит в ветку первой
-    // готовой. Rust-специфика: когда одна ветка выигрывает, **остальные Future
-    // дропаются** прямо в середине своего `.await` — их state-machine уничтожается,
-    // async-код в них больше не запустится. Это **не** `Promise.race` из JS, где
-    // проигравшие промисы продолжают крутиться и могут оставить «хвостовые»
-    // эффекты. Отсюда — понятие cancellation safety: безопасно ли дропнуть
-    // данный future в произвольной await-точке без порчи общего состояния.
-    // Все ветки ниже cancel-safe; пояснения — рядом с каждой.
+    run_event_loop(term.terminal(), &mut app).await
+}
+
+/// Async event loop: render → ждём первое событие → реагируем → повторяем.
+///
+/// Что в `tokio::select!`:
+/// - `events.next()` — следующий `Event` от crossterm. `Event` — это enum:
+///   `Key(KeyEvent) | Mouse(...) | Resize(u16, u16) | Paste(String) |
+///   FocusGained | FocusLost`.
+/// - `signal::ctrl_c()` — то же поведение, что в Phase 1: ловим SIGINT
+///   независимо от того, отжата ли клавиша Ctrl+C в терминале.
+///
+/// Хоткеи task 3-5: `q` / `Esc` → выход; стрелки `↑`/`↓` двигают выделение.
+/// Остальные клавиши не-выходные — task 4 (Phase 4) добавит сортировку (`s`),
+/// фильтр (`/`) и т.д.
+async fn run_event_loop(terminal: &mut ui::Tui, app: &mut App) -> Result<()> {
+    // EventStream создаётся ОДИН раз: внутри он держит поток-поллер
+    // и канал событий. Пересоздавать в loop = терять буферизованные
+    // события и платить за spawn потока на каждой итерации.
+    let mut events = EventStream::new();
+
     loop {
+        // Closure `|frame| ui::render(frame, app)` реборроу-ет `*app` на время
+        // draw'а; после возврата borrow заканчивается, и app снова доступен
+        // в match-ветках ниже. Реборроу — автоматическое поведение Rust для
+        // mut-references в captures.
+        terminal.draw(|frame| ui::render(frame, app))?;
+
         tokio::select! {
-            // `ticker.tick()` cancel-safe: при дропе расписание Interval остаётся
-            // на месте, следующий вызов в новой итерации loop подхватит точно
-            // в нужный момент. Первый `tick()` резолвится сразу, без ожидания
-            // в один период; для стартовой задержки есть `interval_at(start, period)`.
-            _ = ticker.tick() => {
-                // ВАЖНО: fetch_backends — в **теле** ветки, а не внутри select!.
-                // Как только тик выиграл, тело уже ни с кем не гоняется; `.await`
-                // на fetch_backends прервать Ctrl+C нельзя — мы вернёмся
-                // в select! только после возврата из fetch_backends. Для Phase 1
-                // это нормально (запрос быстрый). Phase 3 — обернём долгие
-                // операции в отдельный select! / CancellationToken.
-                let backends = db::fetch_backends(&client).await?;
-                let mut table = Table::new(&backends);
-                table.with(Style::psql());
-                println!("{table}");
+            maybe_event = events.next() => {
+                match maybe_event {
+                    // Гард `kind == Press` отсекает дубликаты на терминалах
+                    // с kitty keyboard protocol (см. task 3).
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                            KeyCode::Up => app.select_previous(),
+                            KeyCode::Down => app.select_next(),
+                            _ => {}
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => return Err(e.into()),
+                    None => return Ok(()),
+                }
             }
-            // `tokio::signal::ctrl_c()` ставит OS-handler на SIGINT (UNIX) /
-            // CTRL_C_EVENT (Windows) и резолвится при сигнале. Cancel-safe:
-            // дроп снимает handler, повторный вызов ставит его снова.
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Ctrl+C received, shutting down");
-                break;
-            }
+            _ = tokio::signal::ctrl_c() => return Ok(()),
         }
     }
-
-    Ok(())
 }

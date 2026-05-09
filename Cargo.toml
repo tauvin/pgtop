@@ -6,7 +6,8 @@ rust-version = "1.95"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-tokio-postgres = "0.7"
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+chrono = "0.4"
 ratatui = "0.30"
 crossterm = "0.29"
 clap = { version = "4", features = ["derive", "env"] }
@@ -16,6 +17,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 color-eyre = "0.6"
+tabled = "0.16"
+
+[dev-dependencies]
+# cargo-husky прописывает git pre-commit hook в .git/hooks/ при сборке dev-профиля
+# (включая `cargo test`). Конкретные команды лежат в .cargo-husky/hooks/pre-commit;
+# user-hooks — отказ от стандартных хуков библиотеки в пользу наших.
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 
 [profile.release]
 lto = "thin"

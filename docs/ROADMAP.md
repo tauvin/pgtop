@@ -12,20 +12,24 @@
 
 ### Задачи
 
-- [ ] Решение: один бинарник, не workspace (разделим позже, когда станет больно)
-- [ ] Зафиксировать стек: tokio, ratatui + crossterm, tokio-postgres, clap, serde + toml, tracing + tracing-appender, thiserror, color-eyre
-- [ ] Создать `Cargo.toml` с актуальными версиями зависимостей, edition 2024, rust-version 1.95
-- [ ] Настроить профиль release с `lto = "thin"`
-- [ ] Поднять локальный Postgres в Docker (порт 5433, чтоб не конфликтовать с системным)
-- [ ] Написать `scripts/load.sh` — генератор тестовой нагрузки (несколько SELECT-ов разной длительности, периодические idle-in-transaction)
-- [ ] Установить `cargo-watch` и `cargo-nextest`
-- [ ] Настроить pre-commit с `cargo clippy --all-targets -- -D warnings` и `cargo fmt --check`
-- [ ] Решить: RustRover или VS Code как основной IDE (RustRover — выбор по умолчанию)
+- [x] Решение: один бинарник, не workspace (разделим позже, когда станет больно)
+- [x] Зафиксировать стек: tokio, ratatui + crossterm, tokio-postgres, clap, serde + toml, tracing + tracing-appender, thiserror, color-eyre
+- [x] Создать `Cargo.toml` с актуальными версиями зависимостей, edition 2024, rust-version 1.95
+- [x] Настроить профиль release с `lto = "thin"`
+- [x] Поднять локальный Postgres в Docker (порт 5433, чтоб не конфликтовать с системным)
+- [x] Написать `scripts/load.sh` — генератор тестовой нагрузки (несколько SELECT-ов разной длительности, периодические idle-in-transaction)
+- [x] Установить `cargo-watch` и `cargo-nextest`
+- [x] Настроить pre-commit с `cargo clippy --all-targets -- -D warnings` и `cargo fmt --check`
+- [x] Решить: RustRover или VS Code как основной IDE (RustRover — выбор по умолчанию)
 
 ### Чему учусь
 
-- Структура Cargo-проекта, профили сборки, dev vs release
-- Базовая конфигурация tooling вокруг Rust
+- Cargo-профили: dev vs release; `lto = "thin"` даёт ~10-20% к скорости рантайма ценой ~2× времени линковки.
+- `[dev-dependencies]` ≠ `[dependencies]`: dev-deps подтягиваются только при `cargo test`/examples/benches. `cargo-husky` живёт в dev-деп именно потому, что нужен только разработчику.
+- `cargo-husky` использует `build.rs` внутри dev-deps: при первой сборке dev-профиля он копирует `.cargo-husky/hooks/*` в `.git/hooks/`. Сам hook — обычный bash, без сторонних зависимостей.
+- `rustfmt --check` жёстко контролирует ширину строк (по умолчанию 100, настраивается через `rustfmt.toml`). Аналог `black` из Python, но обязательный к применению.
+- `cargo clippy -- -D warnings` превращает каждый варнинг в ошибку — удобный gate для CI и pre-commit.
+- `docker compose` сохраняет данные в named volumes между `down`/`up`, но `down -v` чистит volume.
 
 ### Деливерабл
 
@@ -39,21 +43,25 @@
 
 ### Задачи
 
-- [ ] async main на tokio
-- [ ] Подключение к Postgres через tokio-postgres, DSN из env `DATABASE_URL`
-- [ ] Раз в секунду — `SELECT * FROM pg_stat_activity WHERE pid <> pg_backend_pid()`
-- [ ] Маппинг строк в структуру `Backend { pid, usename, state, query, query_start, ... }`
-- [ ] Печать в stdout как таблица (через `tabled` или просто `println!`)
-- [ ] Корректное завершение по Ctrl+C через `tokio::signal`
-- [ ] Базовый error handling через thiserror в библиотечном коде и color-eyre в main
+- [x] async main на tokio
+- [x] Подключение к Postgres через tokio-postgres, DSN из env `DATABASE_URL`
+- [x] Раз в секунду — `SELECT * FROM pg_stat_activity WHERE pid <> pg_backend_pid()`
+- [x] Маппинг строк в структуру `Backend { pid, usename, state, query, query_start, ... }`
+- [x] Печать в stdout как таблица (через `tabled` или просто `println!`)
+- [x] Корректное завершение по Ctrl+C через `tokio::signal`
+- [x] Базовый error handling через thiserror в библиотечном коде и color-eyre в main
 
 ### Чему учусь
 
-- async/await на практике
-- `?`-оператор и propagation ошибок
-- serde-style маппинг строк БД в структуры
-- Разделение error handling: thiserror для типизированных ошибок в lib, color-eyre для красивых паник в main
-- Отсюда — самая важная фаза для «вспомнить Rust», не торопиться
+- `#[tokio::main]` — макрос, разворачивающий обычный `fn main()`, который поднимает tokio-runtime и делает `block_on(async { ... })`.
+- `?`-оператор пропихивает ошибку через `From`-impl. `#[derive(thiserror::Error)] #[from]` генерирует этот `From` бесплатно — отсюда «бесшовный» переход между типами ошибок слоёв.
+- Разделение error handling в Rust: `thiserror` — типизированные структурированные ошибки в библиотечном слое; `color-eyre` — отчёт с контекстом и backtrace в `main`.
+- `tokio_postgres::Row::get`: индекс или имя колонки, тип `T` выводится из контекста, паникует на NULL без `Option<T>` — модель обязана точно отражать nullable-семантику.
+- `DateTime<Utc>` для `timestamptz` требует фичи `with-chrono-0_4` в tokio-postgres. Для `timestamp` без TZ — `NaiveDateTime`.
+- `tokio::time::interval` vs `sleep` в loop: интервал убирает накопительный дрейф; `MissedTickBehavior::{Burst, Skip, Delay}` — три стратегии для «работа дольше периода». Burst — обычно неподходящий дефолт.
+- `tokio::select!` ≠ `Promise.race`: проигравшие Future **дропаются** прямо в await-точке. Отсюда понятие cancellation safety — безопасно ли дропнуть future в любой await без порчи общего состояния.
+- `derive(Tabled)` концептуально ≈ `@attrs.define` + serde-стиль декораторов: но генерация — compile-time на TokenStream, без рантайм-рефлексии. Поэтому требуется явный `display_with = "fn"` для `Option<T>` — макрос не «видит» семантику типа.
+- `#[tabled(skip)]` не считается «чтением» поля для dead_code-анализа: для скрытых полей пришлось точечно добавить `#[allow(dead_code)]` с комментарием «оживут в Phase 4+».
 
 ### Деливерабл
 

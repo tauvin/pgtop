@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# pre-commit hook, установленный cargo-husky из .cargo-husky/hooks/.
+#
+# Запускается автоматически перед каждым `git commit`.
+# Проваливается при первой ошибке (set -eo pipefail) — коммит блокируется.
+# Чтобы пропустить (на свой страх и риск): `git commit --no-verify`.
+
+set -eo pipefail
+
+echo "[husky] cargo fmt --check"
+cargo fmt --check
+
+echo "[husky] cargo clippy --all-targets -- -D warnings"
+cargo clippy --all-targets -- -D warnings

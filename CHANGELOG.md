@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-05-10
+
+### Fixed
+
+- Lowered the declared MSRV from 1.95 to 1.88 (`let-chains` is the newest
+  feature actually in use). 0.1.0 was unbuildable on the GitHub Actions
+  release runners, which ship rustc 1.93.1, and excluded users on stable
+  releases between 1.88 and 1.94.
+
 ## [0.1.0] — 2026-05-10
 
 Initial release.
@@ -52,5 +61,6 @@ Initial release.
   before background tasks are awaited so the user doesn't see a frozen
   frame during teardown.
 
-[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/tauvin/pgtop/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/tauvin/pgtop/releases/tag/v0.1.0

@@ -92,6 +92,11 @@ pgtop --allow-actions
 | `Esc`           | Close modal                                         |
 | `q` / `Ctrl+C`  | Quit                                                |
 
+The mouse scroll-wheel scrolls the active table. Mouse capture is on, so
+holding `Shift` while selecting bypasses pgtop and lets the terminal
+handle text selection (works in iTerm, macOS Terminal, Alacritty, Kitty,
+GNOME Terminal).
+
 ## Configuration
 
 `pgtop` reads `~/.config/pgtop/config.toml` (or `$XDG_CONFIG_HOME/pgtop/config.toml`).

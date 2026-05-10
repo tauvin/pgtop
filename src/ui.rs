@@ -4,6 +4,7 @@ use std::io::{self, Stdout};
 
 use color_eyre::eyre::{Context, Result};
 use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -39,7 +40,8 @@ impl TerminalGuard {
     pub fn new() -> Result<Self> {
         enable_raw_mode().wrap_err("enable raw mode")?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen).wrap_err("enter alternate screen")?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+            .wrap_err("enter alternate screen")?;
 
         Self::install_panic_hook();
 
@@ -68,7 +70,7 @@ impl Drop for TerminalGuard {
 }
 
 fn restore_disciplines() -> io::Result<()> {
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     Ok(())
 }

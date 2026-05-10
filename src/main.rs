@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use color_eyre::eyre::{Context, Result};
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -320,6 +320,11 @@ async fn run_event_loop(
                             },
                         }
                     }
+                    Some(Ok(Event::Mouse(mouse))) => match mouse.kind {
+                        MouseEventKind::ScrollUp => app.select_previous(),
+                        MouseEventKind::ScrollDown => app.select_next(),
+                        _ => {}
+                    },
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),
                     None => return Ok(()),

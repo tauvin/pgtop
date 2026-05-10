@@ -58,6 +58,27 @@ include x86_64 and aarch64 binaries for Linux and macOS, built by
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/tauvin/pgtop/releases/latest/download/pgtop-installer.sh | sh
 ```
 
+### Homebrew (macOS / Linux)
+
+```sh
+brew install tauvin/pgtop/pgtop
+```
+
+### Docker
+
+```sh
+docker run --rm -it ghcr.io/tauvin/pgtop:latest --dsn 'postgres://...'
+```
+
+Multi-arch images (linux/amd64, linux/arm64) are published to GHCR on
+each tag.
+
+### Nix flake
+
+```sh
+nix run github:tauvin/pgtop -- --dsn 'postgres://...'
+```
+
 ## Usage
 
 ```sh

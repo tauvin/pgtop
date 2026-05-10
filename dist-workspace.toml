@@ -8,10 +8,17 @@ cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell"]
+installers = ["shell", "homebrew"]
+# Homebrew tap repository — cargo-dist pushes the generated formula here
+# on each tag. The tap repo (tauvin/homebrew-pgtop) must exist on GitHub
+# and the release workflow needs HOMEBREW_TAP_TOKEN repo secret with
+# write access to it.
+tap = "tauvin/homebrew-pgtop"
 # Target platforms to build apps for (Rust target-triple syntax).
 # Windows excluded: pgtop's TUI relies on Unix-style pty/raw mode that we
 # haven't tested under Windows Terminal — drop until verified.
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Where to host releases
 hosting = "github"
+# Cargo-dist publish jobs to run after artifacts are uploaded.
+publish-jobs = ["homebrew"]

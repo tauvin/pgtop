@@ -416,14 +416,14 @@ pgtop отвечает на 80% вопросов DBA без переключен
 
 ### Задачи
 
-- [ ] **Мышь** — `EnableMouseCapture`, scroll-wheel для пагинации списков, click для выбора строки. Crossterm уже умеет, нужен handler в event loop.
-- [ ] **Keymap в config** — `[keys] cancel = "c"`, `terminate = "K"`, etc. Полезно для тех, кому действие на `c`/`K` неудобно.
-- [ ] **Persist UI state** — последний таб, фильтр, sort в `~/.local/state/pgtop/state.toml`. Восстанавливаем при старте.
-- [ ] **Поиск-и-прыжок (`g`-mark)** — в Activity нажать `g` → input pid → курсор на эту строку.
-- [ ] **Homebrew tap** — `dist init` с `--with-installer homebrew`, опубликовать `homebrew-tap` репо.
-- [ ] **AUR package** — `pgtop-bin` (готовый бинарь из GH Release).
-- [ ] **Docker image** — `tauvin/pgtop:latest` для CI/контейнерных окружений.
-- [ ] **Nix flake** — `nix run github:tauvin/pgtop`.
+- [x] **Мышь** — scroll-wheel для пагинации списков (click-to-select отложен — нужен row hit-test против layout'а таба, малая marginal value).
+- [ ] **Keymap в config** — отложено: требует Command-based dispatch refactor; default-биндинги (htop-like) подходят большинству.
+- [x] **Persist UI state** — `dirs::data_local_dir()/pgtop/state.toml`; restore tab/filter/sort на старте.
+- [x] **Поиск-и-прыжок (`g`-mark)** — `g` на Activity → input pid → курсор на эту строку.
+- [x] **Homebrew tap** — `dist-workspace.toml` обновлён с `installers = ["shell", "homebrew"]` + `tap = "tauvin/homebrew-pgtop"`. Юзер должен создать пустой репо `tauvin/homebrew-pgtop` и `HOMEBREW_TAP_TOKEN` secret в основном репо для авто-публикации.
+- [ ] **AUR package** — отложено, требует AUR-аккаунта и `pgtop-bin` PKGBUILD.
+- [x] **Docker image** — `Dockerfile` (multi-stage, `rust:1.90 → debian:slim`) + `.github/workflows/docker.yml` собирает `ghcr.io/tauvin/pgtop` multi-arch (amd64+arm64) на тег `v*`.
+- [x] **Nix flake** — `flake.nix` через crane, `nix run github:tauvin/pgtop`.
 
 ### Чему учусь
 

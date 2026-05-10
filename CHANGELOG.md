@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-05-10
+
+### Added
+
+- **Mouse scroll-wheel** for navigation. ScrollUp / ScrollDown move
+  the table selection on every tab. Click-to-select is not
+  implemented yet.
+- **Jump-to-pid** — press `g` on the Activity tab, type the pid
+  digits, Enter selects that row in the filtered list, Esc cancels.
+- **Persisted UI state** — last tab, filter pattern, sort column and
+  direction are saved on graceful exit and restored on next startup.
+  File location follows the platform data dir convention
+  (`~/.local/share/pgtop/state.toml` on Linux,
+  `~/Library/Application Support/pgtop/state.toml` on macOS). Best-
+  effort — load / save errors are logged via tracing and never block.
+- **Docker image** at `ghcr.io/tauvin/pgtop` — multi-arch
+  (linux/amd64, linux/arm64), built and pushed by GitHub Actions on
+  each `v*` tag. Multi-stage Dockerfile, `ca-certificates` included
+  for managed-DB TLS.
+- **Homebrew formula** — `dist-workspace.toml` configured with the
+  homebrew installer pointing at `tauvin/homebrew-pgtop`. Tap repo
+  and `HOMEBREW_TAP_TOKEN` secret are user-side prerequisites; once
+  set up, every release auto-updates the formula.
+- **Nix flake** — `flake.nix` builds pgtop via `crane`. Users can
+  `nix run github:tauvin/pgtop -- --dsn '...'` directly.
+
+### Changed
+
+- Mouse capture is now enabled while pgtop is running. Hold `Shift`
+  to bypass capture and let the terminal handle text selection
+  (works in iTerm, Terminal.app, Alacritty, Kitty, GNOME Terminal).
+
 ## [0.1.3] — 2026-05-10
 
 ### Added
@@ -110,7 +142,8 @@ Initial release.
   before background tasks are awaited so the user doesn't see a frozen
   frame during teardown.
 
-[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/tauvin/pgtop/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/tauvin/pgtop/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/tauvin/pgtop/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/tauvin/pgtop/compare/v0.1.0...v0.1.1

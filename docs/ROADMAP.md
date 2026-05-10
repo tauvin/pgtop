@@ -434,3 +434,27 @@ pgtop отвечает на 80% вопросов DBA без переключен
 ### Деливерабл
 
 pgtop устанавливается одной строкой на любой популярной платформе, ежедневное использование без раздражений.
+
+---
+
+## Фаза 13. Технический долг и рефакторинг (бэклог)
+
+Цель: привести в порядок куски кода, которые уже работают, но накопили внутреннюю сложность по мере роста фич. Делать когда захочется чистоты, не блокируем релизы.
+
+### Задачи
+
+- [ ] **Per-mode keymap handlers в `run_event_loop`** — текущий match в `src/main.rs::run_event_loop` 4-уровневый (Event → kind → Mode → KeyCode), ~100 строк. Вынести в `handle_normal_mode`, `handle_filter_mode`, `handle_confirm_cancel`, … — каждая 10-30 строк, dispatch в верхней функции схлопывается до одного match по Mode. Чистый refactor без архитектурного коммитмента.
+- [ ] **Action enum + Keymap** (только если включаем custom keybinds) — определить `enum Action { Quit, SwitchTab(Tab), OpenCancel, … }` + `fn key_to_action(mode, tab, key) -> Option<Action>` + `fn apply(app, action, deps)`. Разделение «что нажали» и «что делаем» позволит грузить keymap из TOML и юнит-тестировать диспетчер. Имеет смысл только когда (а) реально появляется запрос на user-overridable keys или (б) хочется тесты на keymap. Ссылка на отложенный `Keymap в config` пункт фазы 12.
+- [ ] **Time injection для рендера** — `views/activity.rs` и `views/tables.rs` зовут `Utc::now()` прямо в render. Это блокирует snapshot-тесты UI (Phase 10 deferred). Переделать так, чтобы `now` приходил параметром (или через `chrono::DateTime` тип-параметр / clock-trait), затем добавить `insta`-снапшоты Activity/Tables/Detail.
+- [ ] **Расщепление `app.rs`** — файл уже ~1000 строк, держит Tab/Mode/Filter/Sort/ConnectionState/StatsHistory/ExplainPopup/WaitRow/App + кучу методов. Без срочности, но при следующей крупной правке стоит распилить: `app/{tab,mode,filter,sort,connection,stats}.rs`.
+- [ ] **Rate-based метрики в Databases-табе** — сейчас показываем cumulative xact_commit/rollback. Полезнее: дельта за интервал (TPS per database). Требует stateful коллектор (как stats.rs) с prev-snapshot. Не срочно.
+
+### Чему учусь
+
+- Чувство меры: когда расщеплять монолитный match (per-mode handlers), а когда вводить полноценный command pattern (Action enum)
+- Time-injection как предпосылка для детерминистичных UI-тестов
+- Когда «достаточно длинный файл» становится «слишком длинным» — pragmatic threshold
+
+### Деливерабл
+
+Кодовая база с несколько меньшим cognitive load: основной event-loop ~50 строк, Activity/Tables покрыты snapshot-тестами, app.rs распилен по существительным.

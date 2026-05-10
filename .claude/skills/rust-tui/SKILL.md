@@ -19,18 +19,33 @@ Skill активируется при работе над:
 
 ```
 src/
-  main.rs        — entry point: connect → spawn collector → TerminalGuard → event loop
-  app.rs         — App-state (backends, filtered, table_state, mode, filter, sort)
-                   плюс enum'ы Mode/SortBy/SortDirection
-  collectors.rs  — фоновые задачи, опрашивающие БД и публикующие в watch
-  db.rs          — Backend struct + connect + fetch_backends + raw SQL
-  ui.rs          — TerminalGuard (RAII) + render-функции + format-хелперы
+  main.rs                — entry point: 5×connect → 5×spawn → TerminalGuard → event loop
+  app.rs                 — App-state (per-tab data + Mode/Tab/Filter/Sort + StatsHistory)
+  db.rs                  — Backend/Lock/Replica/TopQuery/Stats + fetch_* + raw SQL
+  collectors/
+    mod.rs               — re-exports
+    activity.rs          — pg_stat_activity (1s)
+    locks.rs             — pg_locks JOIN pg_class (1s)
+    top_queries.rs       — pg_stat_statements с extension-detection (10s)
+    replication.rs       — pg_stat_replication (5s)
+    stats.rs             — TPS/conns/cache hit с stateful prev-snapshot (1s)
+  views/
+    mod.rs               — re-exports
+    activity.rs          — табличный render Activity
+    locks.rs             — Locks с подсветкой waiting
+    top_queries.rs       — three-state: Loading/ExtensionMissing/Available
+    replication.rs       — empty-state + table
+  widgets/
+    mod.rs               — re-exports
+    detail.rs            — centered popup для Activity Detail
+    filter_line.rs       — статус-строка фильтра
+    footer.rs            — mode/tab-aware хоткеи
+    sparklines.rs        — header-полоса TPS/conns/cache
+    tabs.rs              — tab bar
+  ui.rs                  — TerminalGuard (RAII) + top-level render dispatch
 ```
 
-Дальнейшее планируемое расщепление (Phase 5):
-- `collectors/` директория с по-сборщику-на-файл (activity, locks, top_queries, replication);
-- `views/` для render-кода разных табов;
-- `widgets/` для переиспользуемых ratatui-композиций.
+**Когда расщеплять модуль на директорию.** JIT-принцип: монолит `X.rs` живёт пока в нём один тип/одна сущность. Появляется второй (locks-collector рядом с activity-collector) — режется на `X/{mod.rs, foo.rs, bar.rs}`. Преждевременный split (когда «когда-нибудь будет много файлов») = просто лишние папки.
 
 Источник истины по фазам — [`docs/ROADMAP.md`](../../../docs/ROADMAP.md).
 
@@ -201,6 +216,187 @@ result
 5. Возврат `result` из main
 
 JoinHandle::await даёт **гарантию** «таска завершилась», в отличие от runtime-abort при drop'е runtime.
+
+---
+
+## Multi-source pipeline: несколько collector'ов параллельно
+
+Когда источников становится больше одного (Phase 5 — Activity, Locks, Top Queries, Replication, Stats), архитектура расширяется механически:
+
+```rust
+// main.rs
+// 1. Отдельный connect на каждого collector'а — true параллелизм.
+//    `tokio_postgres::Client` НЕ Clone (хотя Arc'нут внутри),
+//    и `Arc<Client>` сериализовал бы запросы через один driver.
+let client_activity = db::connect(&dsn).await?;
+let client_locks = db::connect(&dsn).await?;
+let client_top_queries = db::connect(&dsn).await?;
+// ...
+
+// 2. Свой watch::channel<T> на каждый snapshot-тип.
+let (activity_tx, activity_rx) = watch::channel::<Vec<Backend>>(Vec::new());
+let (locks_tx, locks_rx) = watch::channel::<Vec<Lock>>(Vec::new());
+let (top_queries_tx, top_queries_rx) =
+    watch::channel::<TopQueriesSnapshot>(TopQueriesSnapshot::Loading);
+// ...
+
+// 3. spawn'аем все, держим JoinHandle'ы.
+let activity_handle = tokio::spawn(run_activity_collector(client_activity, activity_tx, cancel.clone()));
+let locks_handle    = tokio::spawn(run_locks_collector(client_locks, locks_tx, cancel.clone()));
+// ...
+
+// 4. select! с веткой на каждый канал.
+loop {
+    terminal.draw(|f| ui::render(f, app))?;
+    tokio::select! {
+        // events.next() / signal::ctrl_c() / data branches
+        res = activity_rx.changed() => {
+            if res.is_ok() {
+                app.set_backends(activity_rx.borrow_and_update().clone());
+            }
+        }
+        res = locks_rx.changed() => { /* same shape */ }
+        // ...
+    }
+}
+
+// 5. На shutdown — `tokio::join!` ждёт всех.
+let _ = tokio::join!(activity_handle, locks_handle, top_queries_handle, /* ... */);
+```
+
+**Почему НЕ один общий enum-канал** (`watch::channel<Snapshot>` где `enum Snapshot { Activity(...), Locks(...) }`):
+- Любой send заменяет последнее значение → теряются обновления других источников.
+- Нужны были бы `mpsc` + queue, что усложняет «latest-wins»-семантику.
+- Отдельные каналы — proper isolation, явный `select!`-pattern.
+
+**Stateful collector** (когда нужен diff между snapshot'ами, как TPS у stats):
+```rust
+pub async fn run_stats_collector(client, tx, cancel) {
+    let mut prev_xacts: Option<i64> = None;
+    let mut prev_time: Option<Instant> = None;
+    loop {
+        // tick + cancel select
+        let raw = fetch_raw_stats(&client).await?;
+        let now = Instant::now();
+        let tps = match (prev_xacts, prev_time) {
+            (Some(px), Some(pt)) => (raw.xacts - px) as f64 / now.duration_since(pt).as_secs_f64(),
+            _ => 0.0,  // первый tick — нет prev
+        };
+        prev_xacts = Some(raw.xacts);
+        prev_time = Some(now);
+        tx.send(Stats { tps, ... });
+    }
+}
+```
+
+State держится локально в функции — переживает между итерациями loop'а, scope-ownership, никаких внешних структур.
+
+---
+
+## Опциональные фичи через three-state snapshot
+
+Когда фича может **отсутствовать** на сервере (extension не установлен, конфиг disabled, etc.) — чище explicit FSM, чем `Option<Vec<T>>`:
+
+```rust
+#[derive(Debug, Clone)]
+pub enum TopQueriesSnapshot {
+    Loading,            // initial, до первого poll'а
+    ExtensionMissing,   // pg_stat_statements не установлен
+    Available(Vec<TopQuery>),
+}
+```
+
+Различие важное:
+- `Option::None` склеивает «ещё не загрузили» и «недоступно».
+- UI должен рисовать **разный** fallback: «Loading…» vs инструкция как поставить.
+
+**Detection в fetch-функции:** EXISTS-подзапрос вместо try-and-handle-error:
+```rust
+let row = client.query_one(
+    "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements')",
+    &[],
+).await?;
+let exists: bool = row.get(0);
+if !exists { return Ok(TopQueriesSnapshot::ExtensionMissing); }
+// ... reading from pg_stat_statements
+```
+
+Парсить error message «relation does not exist» хрупко (формат меняется между версиями); EXISTS — детерминистично, +1 round-trip за poll.
+
+**Empty-state UX:** для случая «фича доступна, но данных пока нет» (например `pg_stat_replication` без реплик) — отдельная render-ветка с info-message. Silent empty-table = «pgtop сломан?»; явное «No active replicas. ...» — пользователь понимает.
+
+---
+
+## Sparkline header через `VecDeque` ring-buffer
+
+Header-метрики (TPS, active conns, cache hit) — push'атся в bounded ring-buffer:
+
+```rust
+pub struct StatsHistory {
+    pub tps: VecDeque<f64>,
+    pub conns: VecDeque<u32>,
+    pub cache_hit: VecDeque<f64>,
+    pub current: Option<Stats>,
+}
+
+const STATS_HISTORY_LEN: usize = 60;  // минута истории при 1Hz
+
+fn push_bounded<T>(buf: &mut VecDeque<T>, value: T) {
+    buf.push_back(value);
+    if buf.len() > STATS_HISTORY_LEN {
+        buf.pop_front();
+    }
+}
+```
+
+`VecDeque` критично — `pop_front` амортизированно O(1), у `Vec` это O(n). Для high-frequency обновлений правильный инструмент.
+
+**`Sparkline` widget принимает `&[u64]`**, не f64:
+- Для `f64` метрик с малыми значениями (TPS<10) — масштабировать `(v * 10.0) as u64` перед передачей. Auto-max не искажает форму графика, но без scaling'а дробные значения truncate'ятся в нули.
+- Для процентов фиксировать `.max(100)` чтобы 99% не выглядело как «забит» когда диапазон стабилизировался.
+
+```rust
+let data: Vec<u64> = history.tps.iter().map(|&v| (v * 10.0) as u64).collect();
+Sparkline::default()
+    .block(Block::default().borders(Borders::TOP).title(format!(" TPS: {:.1} ", current)))
+    .data(&data)
+    .style(Style::new().fg(Color::Cyan));
+```
+
+Title в block'е — компактный способ показать **текущее** значение рядом с историей, без отдельного label widget'а.
+
+---
+
+## Postgres SQL-quirks под tokio-postgres
+
+Без extra-крейтов (`rust_decimal`, `cidr`, `ipnet`) tokio-postgres не умеет десериализовать ряд Postgres-типов. Решается явными кастами в SQL:
+
+| Postgres-тип / выражение | Rust-проблема | Cast |
+|---|---|---|
+| `SUM(bigint)` | возвращает `numeric`, не `bigint` | `SUM(...)::int8` |
+| `COUNT(*)` | возвращает `bigint` (часто хочется `i32`) | `COUNT(*)::int4` |
+| `100.0 * x` | numeric литерал → результат numeric | `(100.0 * x)::float8` |
+| `inet` (client_addr) | требует `cidr`-крейт | `client_addr::text` |
+| `xid` (backend_xid) | требует feature-флага | `backend_xid::text` |
+| `pg_lsn` (sent_lsn) | свой формат | `sent_lsn::text` |
+| `interval` (replay_lag) | свой формат | `EXTRACT(EPOCH FROM replay_lag)::float8` |
+
+Принцип: **каст в целевой Rust-тип в SQL**, а не подключать новые крейты ради одного поля.
+
+---
+
+## NULL-safety в Postgres-моделях
+
+**По дефолту все `Option<T>` для `timestamp`/`text`/`int`-полей**, даже если docs обещают NOT NULL. Реалии прода:
+- `pg_stat_activity.backend_start` — формально NOT NULL, на проде встречается NULL у служебных backend'ов (checkpointer, walreceiver, walwriter).
+- `pg_stat_activity.pid` — действительно NOT NULL для прикладных backend'ов, но NULL для prepared transactions.
+- Field rename'ы между мажорами (`pg_stat_statements.total_time` → `total_exec_time` в PG13).
+
+Цена ошибки несимметрична:
+- Лишний `Option` → один `unwrap_or_else(em_dash)` в render.
+- Missing `Option` → **runtime panic** в `Row::get` (не компиляционная ошибка).
+
+Стратегия: всегда `Option<T>` для nullable, и снимать `Option` точечно только когда **явно подтверждено** (на бенчмарке / явной WHERE-фильтрации) что NULL невозможен.
 
 ---
 

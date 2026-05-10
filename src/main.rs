@@ -10,9 +10,11 @@ mod app;
 mod collectors;
 mod db;
 mod ui;
+mod views;
+mod widgets;
 
-use app::{App, Mode};
-use db::Backend;
+use app::{App, Mode, Tab};
+use db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
 
 const DEFAULT_DSN: &str = "postgres://pgtop:pgtop@localhost:5433/pgtop";
 
@@ -24,7 +26,16 @@ async fn main() -> Result<()> {
     // вернётся в Phase 7 через `tracing-appender` в файл.
 
     let dsn = env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DSN.to_string());
-    let client = db::connect(&dsn).await?;
+    // Каждый collector получает свой connection через отдельный `db::connect`.
+    // tokio_postgres::Client не impl Clone (хотя внутри Arc'нут — public API
+    // не экспонирует), и совместное использование через `Arc<Client>` тоже
+    // сериализовало бы запросы через единственный driver. Параллельные
+    // соединения дёшевы (Postgres легко держит десятки) и дают true-параллелизм.
+    let client_activity = db::connect(&dsn).await?;
+    let client_locks = db::connect(&dsn).await?;
+    let client_top_queries = db::connect(&dsn).await?;
+    let client_replication = db::connect(&dsn).await?;
+    let client_stats = db::connect(&dsn).await?;
 
     // watch::channel(initial) — latest-wins канал. Sender хранит ровно одно
     // значение, при `send` оно заменяется; Receiver-ы видят новую версию через
@@ -34,39 +45,79 @@ async fn main() -> Result<()> {
     // Initial value — пустой Vec: до первого тика collector'а UI рисует пустую
     // таблицу. Первый tick происходит сразу (interval так устроен), задержка
     // до первого реального снапшота = одно сетевое RTT к БД.
-    let (data_tx, data_rx) = watch::channel::<Vec<Backend>>(Vec::new());
+    let (activity_tx, activity_rx) = watch::channel::<Vec<Backend>>(Vec::new());
+    let (locks_tx, locks_rx) = watch::channel::<Vec<Lock>>(Vec::new());
+    let (top_queries_tx, top_queries_rx) =
+        watch::channel::<TopQueriesSnapshot>(TopQueriesSnapshot::Loading);
+    let (replication_tx, replication_rx) = watch::channel::<Vec<Replica>>(Vec::new());
+    // Stats — initial value: TPS=0, conns=0, cache_hit=100% (best guess).
+    let (stats_tx, stats_rx) = watch::channel::<Stats>(Stats {
+        tps: 0.0,
+        active_connections: 0,
+        cache_hit_pct: 100.0,
+    });
 
     // CancellationToken — shared cancel-флаг с нотификацией. clone() шарит
     // underlying state (внутри Arc<...>); cancel с любого клона видят все.
-    // main держит оригинал, collector — клон; на shutdown main зовёт cancel,
-    // collector видит на ближайшей `.cancelled()` await-точке и завершается.
+    // main держит оригинал, collector'ы — клоны; на shutdown main зовёт cancel,
+    // оба collector'а видят на ближайшей `.cancelled()` await-точке.
     let cancel = CancellationToken::new();
 
-    // Сохраняем JoinHandle, чтобы дождаться реального завершения collector'а
-    // на shutdown'е (а не просто понадеяться на runtime-abort).
-    let collector_handle = tokio::spawn(collectors::run_activity_collector(
-        client,
-        data_tx,
+    let activity_handle = tokio::spawn(collectors::run_activity_collector(
+        client_activity,
+        activity_tx,
+        cancel.clone(),
+    ));
+    let locks_handle = tokio::spawn(collectors::run_locks_collector(
+        client_locks,
+        locks_tx,
+        cancel.clone(),
+    ));
+    let top_queries_handle = tokio::spawn(collectors::run_top_queries_collector(
+        client_top_queries,
+        top_queries_tx,
+        cancel.clone(),
+    ));
+    let replication_handle = tokio::spawn(collectors::run_replication_collector(
+        client_replication,
+        replication_tx,
+        cancel.clone(),
+    ));
+    let stats_handle = tokio::spawn(collectors::run_stats_collector(
+        client_stats,
+        stats_tx,
         cancel.clone(),
     ));
 
     let mut app = App::new();
     let mut term = ui::TerminalGuard::new()?;
-    let loop_result = run_event_loop(term.terminal(), &mut app, data_rx).await;
+    let loop_result = run_event_loop(
+        term.terminal(),
+        &mut app,
+        activity_rx,
+        locks_rx,
+        top_queries_rx,
+        replication_rx,
+        stats_rx,
+    )
+    .await;
 
-    // Восстанавливаем терминал ДО shutdown'а collector'а: иначе пользователь
-    // видит замороженный кадр пока мы ждём завершение фоновой таски (~до 1с).
-    // `drop(term)` явно вызывает Drop, который снимет alt-screen + raw mode.
+    // Восстанавливаем терминал ДО shutdown'а collector'ов: иначе пользователь
+    // видит замороженный кадр пока мы ждём завершение фоновых тасок (~до 1с).
     drop(term);
 
-    // Просим collector завершиться. Он проснётся на ближайшей
-    // `cancel.cancelled()` ветке в своих `select!` и вернётся.
+    // Сигнал всем collector'ам. Cancel идемпотентен и идёт через клон токена.
     cancel.cancel();
 
-    // Ждём, что collector действительно завершился. JoinHandle::await отдаёт
-    // `Result<(), JoinError>`: Err только при панике в таске. Игнорируем
-    // (panic-hook уже отрисовал бы), главное — синхронизация на завершении.
-    let _ = collector_handle.await;
+    // Ждём все handle'ы. `tokio::join!` завершается, когда **все** future'ы
+    // готовы. `let _ =` глушит JoinError'ы от потенциальной паники в таске.
+    let _ = tokio::join!(
+        activity_handle,
+        locks_handle,
+        top_queries_handle,
+        replication_handle,
+        stats_handle,
+    );
 
     loop_result
 }
@@ -85,7 +136,11 @@ async fn main() -> Result<()> {
 async fn run_event_loop(
     terminal: &mut ui::Tui,
     app: &mut App,
-    mut data_rx: watch::Receiver<Vec<Backend>>,
+    mut activity_rx: watch::Receiver<Vec<Backend>>,
+    mut locks_rx: watch::Receiver<Vec<Lock>>,
+    mut top_queries_rx: watch::Receiver<TopQueriesSnapshot>,
+    mut replication_rx: watch::Receiver<Vec<Replica>>,
+    mut stats_rx: watch::Receiver<Stats>,
 ) -> Result<()> {
     let mut events = EventStream::new();
 
@@ -115,13 +170,34 @@ async fn run_event_loop(
                         // обычная буква). `Esc` контекстный.
                         match &app.mode {
                             Mode::Normal => match key.code {
+                                // Универсальный quit (любой таб).
                                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+
+                                // Tab switching (любой таб).
+                                KeyCode::Char('1') => app.set_tab(Tab::Activity),
+                                KeyCode::Char('2') => app.set_tab(Tab::Locks),
+                                KeyCode::Char('3') => app.set_tab(Tab::TopQueries),
+                                KeyCode::Char('4') => app.set_tab(Tab::Replication),
+                                KeyCode::Tab => app.next_tab(),
+
+                                // ↑↓ работают на любом табе с навигацией: select_previous/next
+                                // сами диспатчат по current_tab (no-op на табах без list).
                                 KeyCode::Up => app.select_previous(),
                                 KeyCode::Down => app.select_next(),
-                                KeyCode::Enter => app.on_enter(),
-                                KeyCode::Char('/') => app.enter_filter_mode(),
-                                KeyCode::Char('s') => app.cycle_sort_column(),
-                                KeyCode::Char('S') => app.toggle_sort_direction(),
+
+                                // Enter (Detail view) пока только в Activity.
+                                KeyCode::Enter if app.current_tab == Tab::Activity => {
+                                    app.on_enter()
+                                }
+                                KeyCode::Char('/') if app.current_tab == Tab::Activity => {
+                                    app.enter_filter_mode()
+                                }
+                                KeyCode::Char('s') if app.current_tab == Tab::Activity => {
+                                    app.cycle_sort_column()
+                                }
+                                KeyCode::Char('S') if app.current_tab == Tab::Activity => {
+                                    app.toggle_sort_direction()
+                                }
                                 _ => {}
                             },
                             Mode::Detail(_) => match key.code {
@@ -145,21 +221,60 @@ async fn run_event_loop(
                 }
             }
 
-            // `.changed()` резолвится при увеличении внутренней версии (т.е.
-            // collector сделал send). Cancel-safe: версия отслеживается на
-            // стороне Receiver'а, дроп future не теряет «уже видел/не видел».
-            //
-            // `Err(_)` — все Sender'ы закрыты (collector упал/завершился).
-            // На Phase 3 — просто выходим из UI; в block B будет аккуратнее.
-            res = data_rx.changed() => {
+            // Activity snapshot.
+            res = activity_rx.changed() => {
                 match res {
                     Ok(()) => {
-                        // `borrow_and_update()` отдаёт `Ref<Vec<Backend>>` и
-                        // помечает «эту версию я видел». Клонируем содержимое,
-                        // потому что хотим владеть им в App (и `Ref` нельзя
-                        // держать через .await).
-                        let snapshot = data_rx.borrow_and_update().clone();
+                        // `borrow_and_update` отдаёт `Ref<Vec<...>>` и помечает
+                        // версию как видимую. Клонируем содержимое — `Ref`
+                        // нельзя держать через `.await`.
+                        let snapshot = activity_rx.borrow_and_update().clone();
                         app.set_backends(snapshot);
+                    }
+                    Err(_) => return Ok(()),
+                }
+            }
+
+            // Locks snapshot.
+            res = locks_rx.changed() => {
+                match res {
+                    Ok(()) => {
+                        let snapshot = locks_rx.borrow_and_update().clone();
+                        app.set_locks(snapshot);
+                    }
+                    Err(_) => return Ok(()),
+                }
+            }
+
+            // Top Queries snapshot.
+            res = top_queries_rx.changed() => {
+                match res {
+                    Ok(()) => {
+                        let snapshot = top_queries_rx.borrow_and_update().clone();
+                        app.set_top_queries(snapshot);
+                    }
+                    Err(_) => return Ok(()),
+                }
+            }
+
+            // Replication snapshot.
+            res = replication_rx.changed() => {
+                match res {
+                    Ok(()) => {
+                        let snapshot = replication_rx.borrow_and_update().clone();
+                        app.set_replication(snapshot);
+                    }
+                    Err(_) => return Ok(()),
+                }
+            }
+
+            // Stats snapshot — push в ring-буфер для sparkline'ов в шапке.
+            res = stats_rx.changed() => {
+                match res {
+                    Ok(()) => {
+                        // Stats — Copy, можно `*`-deref'ить из Ref без clone'а.
+                        let stats = *stats_rx.borrow_and_update();
+                        app.push_stats(stats);
                     }
                     Err(_) => return Ok(()),
                 }

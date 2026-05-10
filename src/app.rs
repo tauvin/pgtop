@@ -6,6 +6,7 @@
 //! видимых backend'ов).
 
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -13,7 +14,45 @@ use ratatui::widgets::TableState;
 use regex::{Regex, RegexBuilder};
 use tui_input::{Input, InputRequest};
 
-use crate::db::Backend;
+use crate::db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
+
+/// Активный таб TUI. Каждый таб — отдельный «view» с собственными данными
+/// и хоткеями. `index()` соответствует позиции в `Tab::all()` (для tab bar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Activity,
+    Locks,
+    TopQueries,
+    Replication,
+}
+
+impl Tab {
+    pub const fn all() -> &'static [Tab] {
+        &[Tab::Activity, Tab::Locks, Tab::TopQueries, Tab::Replication]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Activity => "Activity",
+            Self::Locks => "Locks",
+            Self::TopQueries => "Top Queries",
+            Self::Replication => "Replication",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Activity => 0,
+            Self::Locks => 1,
+            Self::TopQueries => 2,
+            Self::Replication => 3,
+        }
+    }
+
+    pub fn from_index(i: usize) -> Option<Tab> {
+        Self::all().get(i).copied()
+    }
+}
 
 /// Модальные состояния UI.
 ///
@@ -162,9 +201,27 @@ pub struct App {
     pub filtered: Vec<usize>,
 
     pub table_state: TableState,
+
+    // --- Locks tab data (Phase 5 block B) ---
+    pub locks: Vec<Lock>,
+    pub locks_table_state: TableState,
+
+    // --- Top Queries tab data (Phase 5 block C) ---
+    pub top_queries: TopQueriesSnapshot,
+    pub top_queries_table_state: TableState,
+
+    // --- Replication tab data (Phase 5 block D) ---
+    pub replication: Vec<Replica>,
+    pub replication_table_state: TableState,
+
+    // --- Header sparklines (Phase 5 block E) ---
+    pub stats: StatsHistory,
+
+    // --- Глобальное состояние ---
     pub mode: Mode,
     pub filter: Filter,
     pub sort: Sort,
+    pub current_tab: Tab,
 }
 
 impl App {
@@ -173,9 +230,17 @@ impl App {
             backends: Vec::new(),
             filtered: Vec::new(),
             table_state: TableState::default(),
+            locks: Vec::new(),
+            locks_table_state: TableState::default(),
+            top_queries: TopQueriesSnapshot::Loading,
+            top_queries_table_state: TableState::default(),
+            replication: Vec::new(),
+            replication_table_state: TableState::default(),
+            stats: StatsHistory::default(),
             mode: Mode::Normal,
             filter: Filter::default(),
             sort: Sort::default(),
+            current_tab: Tab::Activity,
         }
     }
 
@@ -247,24 +312,153 @@ impl App {
         self.filtered.iter().filter_map(|&i| self.backends.get(i))
     }
 
+    /// Сдвиг выделения вверх. Диспатчится на TableState текущего таба
+    /// (Activity → app.table_state, Locks → app.locks_table_state). На
+    /// табах без list-content (TopQueries/Replication пока) — no-op.
     pub fn select_previous(&mut self) {
-        if self.filtered.is_empty() {
-            return;
+        match self.current_tab {
+            Tab::Activity => {
+                if self.filtered.is_empty() {
+                    return;
+                }
+                let i = self
+                    .table_state
+                    .selected()
+                    .map_or(0, |i| i.saturating_sub(1));
+                self.table_state.select(Some(i));
+            }
+            Tab::Locks => {
+                if self.locks.is_empty() {
+                    return;
+                }
+                let i = self
+                    .locks_table_state
+                    .selected()
+                    .map_or(0, |i| i.saturating_sub(1));
+                self.locks_table_state.select(Some(i));
+            }
+            Tab::TopQueries => {
+                let TopQueriesSnapshot::Available(queries) = &self.top_queries else {
+                    return;
+                };
+                if queries.is_empty() {
+                    return;
+                }
+                let i = self
+                    .top_queries_table_state
+                    .selected()
+                    .map_or(0, |i| i.saturating_sub(1));
+                self.top_queries_table_state.select(Some(i));
+            }
+            Tab::Replication => {
+                if self.replication.is_empty() {
+                    return;
+                }
+                let i = self
+                    .replication_table_state
+                    .selected()
+                    .map_or(0, |i| i.saturating_sub(1));
+                self.replication_table_state.select(Some(i));
+            }
         }
-        let i = self
-            .table_state
-            .selected()
-            .map_or(0, |i| i.saturating_sub(1));
-        self.table_state.select(Some(i));
     }
 
+    /// Сдвиг выделения вниз. Структурно зеркальный `select_previous`.
     pub fn select_next(&mut self) {
-        if self.filtered.is_empty() {
-            return;
+        match self.current_tab {
+            Tab::Activity => {
+                if self.filtered.is_empty() {
+                    return;
+                }
+                let max = self.filtered.len() - 1;
+                let i = self.table_state.selected().map_or(0, |i| (i + 1).min(max));
+                self.table_state.select(Some(i));
+            }
+            Tab::Locks => {
+                if self.locks.is_empty() {
+                    return;
+                }
+                let max = self.locks.len() - 1;
+                let i = self
+                    .locks_table_state
+                    .selected()
+                    .map_or(0, |i| (i + 1).min(max));
+                self.locks_table_state.select(Some(i));
+            }
+            Tab::TopQueries => {
+                let TopQueriesSnapshot::Available(queries) = &self.top_queries else {
+                    return;
+                };
+                if queries.is_empty() {
+                    return;
+                }
+                let max = queries.len() - 1;
+                let i = self
+                    .top_queries_table_state
+                    .selected()
+                    .map_or(0, |i| (i + 1).min(max));
+                self.top_queries_table_state.select(Some(i));
+            }
+            Tab::Replication => {
+                if self.replication.is_empty() {
+                    return;
+                }
+                let max = self.replication.len() - 1;
+                let i = self
+                    .replication_table_state
+                    .selected()
+                    .map_or(0, |i| (i + 1).min(max));
+                self.replication_table_state.select(Some(i));
+            }
         }
-        let max = self.filtered.len() - 1;
-        let i = self.table_state.selected().map_or(0, |i| (i + 1).min(max));
-        self.table_state.select(Some(i));
+    }
+
+    /// Обновить snapshot блокировок. Selection клампится по тем же правилам,
+    /// что в `set_backends` (пусто → None; selected ≥ len → последняя; None +
+    /// данные → первая).
+    pub fn set_locks(&mut self, locks: Vec<Lock>) {
+        self.locks = locks;
+        let len = self.locks.len();
+        match self.locks_table_state.selected() {
+            _ if len == 0 => self.locks_table_state.select(None),
+            Some(i) if i >= len => self.locks_table_state.select(Some(len - 1)),
+            None => self.locks_table_state.select(Some(0)),
+            Some(_) => {}
+        }
+    }
+
+    /// Обновить snapshot Top Queries. На non-Available состояниях
+    /// (Loading / ExtensionMissing) сбрасываем selection в None.
+    pub fn set_top_queries(&mut self, snapshot: TopQueriesSnapshot) {
+        self.top_queries = snapshot;
+        let len = match &self.top_queries {
+            TopQueriesSnapshot::Available(queries) => queries.len(),
+            _ => 0,
+        };
+        match self.top_queries_table_state.selected() {
+            _ if len == 0 => self.top_queries_table_state.select(None),
+            Some(i) if i >= len => self.top_queries_table_state.select(Some(len - 1)),
+            None => self.top_queries_table_state.select(Some(0)),
+            Some(_) => {}
+        }
+    }
+
+    /// Обновить snapshot Replication. Те же clamp-правила, что в `set_locks`.
+    pub fn set_replication(&mut self, replication: Vec<Replica>) {
+        self.replication = replication;
+        let len = self.replication.len();
+        match self.replication_table_state.selected() {
+            _ if len == 0 => self.replication_table_state.select(None),
+            Some(i) if i >= len => self.replication_table_state.select(Some(len - 1)),
+            None => self.replication_table_state.select(Some(0)),
+            Some(_) => {}
+        }
+    }
+
+    /// Запушить новые stats в ring-buffer'ы для sparkline'ов в шапке.
+    /// Также обновить `current` для текущего значения в подписи.
+    pub fn push_stats(&mut self, stats: Stats) {
+        self.stats.push(stats);
     }
 
     /// Enter на выбранной строке: открыть detail view.
@@ -300,6 +494,17 @@ impl App {
         self.recompute_filtered();
     }
 
+    /// Переключиться на конкретный таб (хоткеи 1/2/3/4).
+    pub fn set_tab(&mut self, tab: Tab) {
+        self.current_tab = tab;
+    }
+
+    /// Переключиться на следующий таб циклом (хоткей `Tab`).
+    pub fn next_tab(&mut self) {
+        let next = (self.current_tab.index() + 1) % Tab::all().len();
+        self.current_tab = Tab::from_index(next).unwrap();
+    }
+
     /// Выйти из Filter mode. `commit=true` (Enter) — фильтр остаётся;
     /// `commit=false` (Esc) — сбрасываем фильтр.
     pub fn exit_filter_mode(&mut self, commit: bool) {
@@ -325,6 +530,52 @@ impl App {
             self.filter.rebuild_regex();
             self.recompute_filtered();
         }
+    }
+}
+
+/// Ring-буферы для sparkline'ов в шапке + последний снапшот для отображения
+/// текущего значения. Длина буферов = `STATS_HISTORY_LEN`; при переполнении
+/// `pop_front` сдвигает «горизонт» вправо (старые данные выпадают слева).
+///
+/// Несмотря на то, что Stats — это struct, мы храним каждое поле в своём
+/// VecDeque (а не VecDeque<Stats>): для render'а sparkline нужен срез
+/// одного метрика, а не кортежа всех. Memory cost минимальный.
+pub struct StatsHistory {
+    pub tps: VecDeque<f64>,
+    pub conns: VecDeque<u32>,
+    pub cache_hit: VecDeque<f64>,
+    pub current: Option<Stats>,
+}
+
+const STATS_HISTORY_LEN: usize = 60;
+
+impl Default for StatsHistory {
+    fn default() -> Self {
+        Self {
+            tps: VecDeque::with_capacity(STATS_HISTORY_LEN),
+            conns: VecDeque::with_capacity(STATS_HISTORY_LEN),
+            cache_hit: VecDeque::with_capacity(STATS_HISTORY_LEN),
+            current: None,
+        }
+    }
+}
+
+impl StatsHistory {
+    /// Push нового значения в каждое поле + drop старого если len > capacity.
+    /// `pop_front` на VecDeque — амортизированно O(1); никаких relayout'ов
+    /// массива, как у Vec.
+    pub fn push(&mut self, stats: Stats) {
+        push_bounded(&mut self.tps, stats.tps);
+        push_bounded(&mut self.conns, stats.active_connections);
+        push_bounded(&mut self.cache_hit, stats.cache_hit_pct);
+        self.current = Some(stats);
+    }
+}
+
+fn push_bounded<T>(buf: &mut VecDeque<T>, value: T) {
+    buf.push_back(value);
+    if buf.len() > STATS_HISTORY_LEN {
+        buf.pop_front();
     }
 }
 

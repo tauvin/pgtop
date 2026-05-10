@@ -278,13 +278,21 @@ async fn run_event_loop(
                                 }
                                 KeyCode::Char('e') if app.current_tab == Tab::Activity => {
                                     if let Some((pid, query)) = app.selected_query() {
-                                        app.mode = Mode::Explain(ExplainPopup::Loading { pid });
+                                        // Per-popup token, child of the global
+                                        // shutdown token: closing the popup or
+                                        // switching connections cancels it
+                                        // without affecting other tasks.
+                                        let popup_cancel = cancel_for_explain.child_token();
+                                        app.begin_explain(pid, popup_cancel.clone());
                                         let dsn = app.active().dsn.clone();
                                         let conn_idx = app.active;
                                         let tx = update_tx_for_explain.clone();
-                                        let cancel = cancel_for_explain.clone();
                                         tokio::spawn(explain::run_explain(
-                                            dsn, query, conn_idx, tx, cancel,
+                                            dsn,
+                                            query,
+                                            conn_idx,
+                                            tx,
+                                            popup_cancel,
                                         ));
                                     }
                                 }
@@ -402,6 +410,10 @@ async fn run_event_loop(
                         }
                     }
                     Some(UpdateMessage::ExplainResult { conn_idx, plan }) => {
+                        // Drop result if user already switched away — the
+                        // popup_cancel token has been triggered by
+                        // close_modal/set_active and the spawned task is
+                        // returning a "cancelled" Err anyway.
                         if conn_idx == app.active
                             && let Mode::Explain(ref state) = app.mode
                         {
@@ -410,10 +422,11 @@ async fn run_event_loop(
                                 | ExplainPopup::Ready { pid, .. }
                                 | ExplainPopup::Error { pid, .. } => *pid,
                             };
-                            app.mode = Mode::Explain(match plan {
+                            let popup = match plan {
                                 Ok(plan) => ExplainPopup::Ready { pid, plan },
                                 Err(message) => ExplainPopup::Error { pid, message },
-                            });
+                            };
+                            app.complete_explain(popup);
                         }
                     }
                 }

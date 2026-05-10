@@ -4,6 +4,8 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 
+use tokio_util::sync::CancellationToken;
+
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -644,6 +646,11 @@ pub struct App {
     pub current_tab: Tab,
     pub theme: Theme,
     pub last_action_result: Option<ActionResult>,
+
+    /// Cancellation token for the in-flight EXPLAIN task, if any. Owned by
+    /// `App` so any mode transition (close_modal, set_active, mode change)
+    /// can abort the task without leaving it running silently.
+    pub explain_cancel: Option<CancellationToken>,
 }
 
 impl App {
@@ -660,6 +667,7 @@ impl App {
             current_tab: Tab::Activity,
             theme: Theme::default(),
             last_action_result: None,
+            explain_cancel: None,
         }
     }
 
@@ -677,12 +685,35 @@ impl App {
     }
 
     /// Set the active connection by index. Out-of-bounds is a no-op.
-    /// Resets `Mode` to `Normal`.
+    /// Resets `Mode` to `Normal`, cancelling any in-flight EXPLAIN.
     #[allow(dead_code)]
     pub fn set_active(&mut self, idx: usize) {
         if idx < self.connections.len() && idx != self.active {
             self.active = idx;
+            self.cancel_explain();
             self.mode = Mode::Normal;
+        }
+    }
+
+    /// Begin an EXPLAIN: cancel any prior in-flight task, store the new
+    /// token, and switch to the loading popup.
+    pub fn begin_explain(&mut self, pid: i32, cancel: CancellationToken) {
+        if let Some(old) = self.explain_cancel.replace(cancel) {
+            old.cancel();
+        }
+        self.mode = Mode::Explain(ExplainPopup::Loading { pid });
+    }
+
+    /// Replace the popup state when the EXPLAIN finishes (success or error)
+    /// and drop the now-redundant cancel token.
+    pub fn complete_explain(&mut self, popup: ExplainPopup) {
+        self.explain_cancel = None;
+        self.mode = Mode::Explain(popup);
+    }
+
+    fn cancel_explain(&mut self) {
+        if let Some(c) = self.explain_cancel.take() {
+            c.cancel();
         }
     }
 
@@ -757,6 +788,7 @@ impl App {
     }
 
     pub fn close_modal(&mut self) {
+        self.cancel_explain();
         self.mode = Mode::Normal;
     }
 

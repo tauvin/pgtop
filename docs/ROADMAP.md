@@ -470,26 +470,26 @@ Event-loop ~50 строк, Activity/Tables/Detail покрыты snapshot-тес
 
 ### Critical (security / correctness)
 
-- [ ] **TLS `verify-ca` хостнейм-проверка** — `db.rs:108-128`. Сейчас и `verify-ca`, и `verify-full` идут в один `verifying_tls_config` с проверкой hostname (rustls default). По libpq `verify-ca` проверяет только цепочку, не hostname. Завести `NoHostnameVerify` verifier.
-- [ ] **EXPLAIN: `statement_timeout` + реальный cancel** — `explain.rs:33`. `client.query` уже летящий не отменяется через `cancel.cancelled()`. Поставить `SET LOCAL statement_timeout = '5s'`, на cancel — `pg_cancel_backend(pg_backend_pid())` через второй connection. Plus EXPLAIN cancellation lifecycle: Alt+N во время Loading сейчас подвешивает popup — abort task на conn-switch.
-- [ ] **Audit log hardening** — `main.rs::init_audit_log`. Сейчас `~/.local/state/pgtop/pgtop.log` создаётся с 0644 (utility-юзеры читают audit на shared host). Plus нет rotation (растёт без ограничений). Plus смешан с `RUST_LOG=debug` (audit теряется в шуме). Создавать с 0600, добавить `tracing_appender::rolling::daily`, разделить через `tracing_subscriber::filter::Targets` (audit → отдельный файл).
+- [x] **TLS `verify-ca` хостнейм-проверка** — `VerifyMode` enum (None/ChainOnly/Full); `ChainOnlyVerifier` оборачивает `WebPkiServerVerifier` и игнорирует `NotValidForName` ошибки.
+- [x] **EXPLAIN: `statement_timeout` + реальный cancel** — `SET statement_timeout = '5s'` перед EXPLAIN; `Client::cancel_token().cancel_query(NoTls)` на cancel; per-popup `CancellationToken` отменяется на `set_active`/`close_modal`.
+- [x] **Audit log hardening** — двух-sink layered subscriber (app + audit), daily rotation, mode 0600 на Unix, log-dir 0700.
 
 ### Important (latent risk / UX)
 
-- [ ] **Bounded mpsc + drop-oldest** или возврат к `watch` для snapshot'ов — `main.rs:96`. Unbounded → renderer отстал → память растёт. Snapshots semантика — latest-wins; one-shot события (ActionResult / ExplainResult / Status) останутся mpsc.
-- [ ] **Silent `Err(_) => {}` в коллекторах** — все 6 «тихих» (`activity/locks/top_queries/replication/databases/tables`). Catch-all арм глотает query-уровневые ошибки (revoked permissions, statement timeout, OOM kill backend'а). Минимум: `tracing::warn!(error=%e)` в каждом.
-- [ ] **`last_action_result` per-connection** — `app.rs`. Сейчас на `App`; действия с не-активного conn'а молча теряются. Переехать на `ConnectionState`.
-- [ ] **Shutdown timeout на `join_all`** — `main.rs:197`. Стуканутый коллектор (DNS resolution wedge) зависает выход. `tokio::time::timeout(Duration::from_secs(2), ...)`.
-- [ ] **`DEFAULT_DSN` → None + clear error** — `config.rs:20`. Сейчас silent fallback на `postgres://pgtop:pgtop@localhost:5433/pgtop` (docker-compose dev). Юзер без конфига получает Connection Refused вместо помощи.
+- [ ] **Bounded mpsc + drop-oldest** — отложено. На текущей нагрузке (2N msg/sec при N≤5) латентный риск, не реальный. Делать когда (а) пользователи начнут жаловаться на память, или (б) появится реальная multi-conn нагрузка ≥10 conn'ов.
+- [x] **Silent `Err(_) => {}` в коллекторах** — `tracing::warn!` с `collector`/`conn_idx`/`error` во всех 7 collector'ах.
+- [x] **`last_action_result` per-connection** — переехало с `App` на `ConnectionState`; результаты не теряются на background-conn.
+- [x] **Shutdown timeout на `join_all`** — `tokio::time::timeout(2s, ...)` + warn-лог на превышение.
+- [x] **`DEFAULT_DSN` → None + clear error** — убран dev-default; сообщение указывает три способа (CLI / env / profile) и путь к config'у.
 
 ### Quality / polish
 
-- [ ] **Filter** расширить с `query` only до `(query, usename, state, datname)` — `app.rs:72-77`. UX leak: `/alice` сейчас даёт пустой список.
-- [ ] **`Resolved::from_layers` unit tests** — `config.rs:160-218`. Priority chain (CLI > env > profile > default) и `actions_allowed && !read_only` без покрытия.
-- [ ] **MSRV CI добавить `cargo test`** — `.github/workflows/ci.yml`. Сейчас msrv-job только `cargo build` — тест с newer-Rust API проскочит.
-- [ ] **`rewrite_verify_sslmode` через DSN parsing** — `db.rs:115-122`. `dsn.contains("sslmode=verify-full")` ловит substring в password/dbname; key-value DSN с пробелами вокруг `=` пропускается.
-- [ ] **Мелкие гнильцы**: `next_tab().unwrap()` (app.rs), panic hook double-install (`ui.rs::install_panic_hook`), stale `#[allow(dead_code)]` (`db.rs::Replica`, `actions.rs::ActionResult.at`).
-- [ ] **Connection pooling per profile** (опционально) — сейчас 7 collector + 1 executor = 8 idle PG-сессий per profile. На multi-profile session становится заметно. `bb8`/`deadpool` с ~2 conn'ами на profile.
+- [x] **Filter** — теперь `(query, usename, state, datname)`; +2 теста.
+- [x] **`Resolved::from_layers` unit tests** — 7 тестов на priority chain и `actions_allowed && !read_only`.
+- [x] **MSRV CI добавить `cargo test`** — `cargo test` теперь и на rustc 1.88.
+- [ ] **`rewrite_verify_sslmode` через DSN parsing** — отложено. Текущий `contains` работает на корректных DSN; substring-в-password — теоретическая угроза.
+- [ ] **Мелкие гнильцы**: `next_tab().unwrap()`, panic hook double-install, stale `#[allow(dead_code)]`. Низкий приоритет.
+- [ ] **Connection pooling per profile** — отложено, требует архитектурного решения (`bb8`/`deadpool` с ~2 conn'ами на profile vs текущая модель «1 conn на collector»).
 
 ### Чему учусь
 

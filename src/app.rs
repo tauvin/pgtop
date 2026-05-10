@@ -127,11 +127,22 @@ pub struct Filter {
 }
 
 impl Filter {
+    /// Match a backend against the compiled regex by checking query, user,
+    /// state, and database name. Any field hit means the backend stays in
+    /// the filtered list. Backends with all four fields empty (rare service
+    /// backends) are dropped.
     pub fn matches(&self, b: &Backend) -> bool {
         let Some(re) = &self.regex else {
             return true;
         };
-        b.query.as_deref().is_some_and(|q| re.is_match(q))
+        [
+            b.query.as_deref(),
+            b.usename.as_deref(),
+            b.state.as_deref(),
+            b.datname.as_deref(),
+        ]
+        .iter()
+        .any(|field| field.is_some_and(|v| re.is_match(v)))
     }
 
     pub fn rebuild_regex(&mut self) {
@@ -1077,6 +1088,37 @@ mod tests {
         f.input = "x".into();
         f.rebuild_regex();
         assert!(!f.matches(&backend(1)));
+    }
+
+    #[test]
+    fn filter_matches_username() {
+        let mut f = Filter::default();
+        f.input = "alice".into();
+        f.rebuild_regex();
+
+        let mut b = backend(1);
+        b.usename = Some("alice".to_string());
+        assert!(f.matches(&b));
+
+        b.usename = Some("bob".to_string());
+        assert!(!f.matches(&b));
+    }
+
+    #[test]
+    fn filter_matches_state_or_datname() {
+        let mut f = Filter::default();
+        f.input = "idle".into();
+        f.rebuild_regex();
+        let mut b = backend(1);
+        b.state = Some("idle in transaction".to_string());
+        assert!(f.matches(&b));
+
+        let mut f = Filter::default();
+        f.input = "prod".into();
+        f.rebuild_regex();
+        let mut b = backend(2);
+        b.datname = Some("catalog_prod".to_string());
+        assert!(f.matches(&b));
     }
 
     #[test]

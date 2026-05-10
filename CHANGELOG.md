@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-05-10
+
+### Added
+
+- **Databases tab** (hotkey `5`) — per-database snapshot from
+  `pg_stat_database`: connection count, cumulative commits and
+  rollbacks (with K/M/B suffixes), cache hit ratio, temp bytes,
+  deadlocks. Sorted by transaction volume so the busiest databases
+  surface first. Default 5 s poll, configurable via `[intervals]
+  databases`.
+- **Tables tab** (hotkey `6`) — top 50 user tables from
+  `pg_stat_user_tables` ordered by dead-tuple count: live and dead
+  tuple counts, dead %, last vacuum and analyze (most recent of manual
+  / autovacuum, formatted as `5m` / `2h` / `3d`), sequential vs index
+  scan counts. Default 10 s poll, configurable via `[intervals]
+  tables`.
+- **Waits histogram tab** (hotkey `7`) — sampling-based aggregation of
+  `(wait_event_type, wait_event)` pairs from the latest activity
+  snapshot. Shows count and share, sorted descending. No extra SQL —
+  reuses the activity collector's data.
+- **EXPLAIN popup** — press `e` on a selected backend in the Activity
+  tab to run `EXPLAIN <query>` on a one-shot ad-hoc connection. Plain
+  EXPLAIN (not `ANALYZE`) so it stays read-only and safe against
+  production. Esc / q closes the popup.
+- **Slow-query alerts** — new top-level config key
+  `slow_query_threshold_secs` (default 30). Active backends running
+  longer than the threshold are rendered in red+bold and surfaced as
+  `⚠ N slow` in the Activity tab title.
+
 ## [0.1.2] — 2026-05-10
 
 ### Added
@@ -81,7 +110,8 @@ Initial release.
   before background tasks are awaited so the user doesn't see a frozen
   frame during teardown.
 
-[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/tauvin/pgtop/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/tauvin/pgtop/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/tauvin/pgtop/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/tauvin/pgtop/releases/tag/v0.1.0

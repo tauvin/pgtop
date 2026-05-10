@@ -203,7 +203,18 @@ async fn main() -> Result<()> {
     persist::save(&persist::UiState::from_app(&app));
     cancel.cancel();
 
-    let _ = futures::future::join_all(handles).await;
+    // 2-second budget for tasks to drop after cancellation. A stuck task
+    // (DNS resolution wedged inside tokio-postgres connect, etc.) shouldn't
+    // keep the process alive — abort the wait and let the runtime tear them
+    // down at process exit.
+    let shutdown = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        futures::future::join_all(handles),
+    )
+    .await;
+    if shutdown.is_err() {
+        tracing::warn!("background tasks did not finish within 2s of cancel; forcing exit");
+    }
 
     loop_result
 }

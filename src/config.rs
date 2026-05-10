@@ -16,14 +16,11 @@ use serde::Deserialize;
 
 use crate::theme::Theme;
 
-/// Default DSN used when nothing else specifies one.
-pub const DEFAULT_DSN: &str = "postgres://pgtop:pgtop@localhost:5433/pgtop";
-
 /// Top-level config loaded from `~/.config/pgtop/config.toml`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
-    /// Profile to use when the CLI does not pick one. `None` falls back to
-    /// env / CLI / `DEFAULT_DSN`.
+    /// Profile to use when the CLI does not pick one. `None` means the user
+    /// must provide a DSN through CLI, env, or a profile.
     pub default_profile: Option<String>,
 
     /// `[profiles.<name>]` sections from TOML.
@@ -159,7 +156,8 @@ pub fn load() -> Result<Config> {
 impl Resolved {
     /// Combine all layers into final values.
     ///
-    /// - DSN: CLI `--dsn` > env `DATABASE_URL` > `profile.dsn` > `DEFAULT_DSN`.
+    /// - DSN: CLI `--dsn` > env `DATABASE_URL` > `profile.dsn`. Errors if
+    ///   none of the three is provided.
     /// - `read_only`: CLI `--read-only` ∨ `profile.read_only`.
     /// - `actions_allowed`: CLI `--allow-actions` ∧ ¬read_only.
     pub fn from_layers(
@@ -184,11 +182,20 @@ impl Resolved {
             None => Profile::default(),
         };
 
-        let dsn = cli_dsn
+        let dsn = match cli_dsn
             .map(str::to_string)
             .or_else(|| std::env::var("DATABASE_URL").ok())
             .or(profile.dsn)
-            .unwrap_or_else(|| DEFAULT_DSN.to_string());
+        {
+            Some(dsn) => dsn,
+            None => {
+                return Err(eyre!(
+                    "no DSN available — pass --dsn, set DATABASE_URL, or define a profile \
+                     in {} (see config.example.toml in the repo for the format)",
+                    config_path().display()
+                ));
+            }
+        };
 
         let read_only = cli_read_only || profile.read_only;
 

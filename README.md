@@ -11,8 +11,8 @@ replication state in a single terminal pane. Live updates over `tokio`,
 non-blocking reconnect, multi-connection support and optional
 cancel/terminate actions on running backends.
 
-<!-- TODO: replace with vhs-recorded GIF -->
 <!-- ![demo](docs/demo.gif) -->
+<!-- Recorded via `vhs docs/demo.tape` against a live Postgres. -->
 
 ## Features
 
@@ -165,13 +165,21 @@ backend's session, or have `pg_signal_backend` granted.
 # Spin up local Postgres + load generator
 docker compose up -d
 
-# Run with auto-reload (cargo-watch)
+# Run against the local DB
 cargo run -- local
 
 # Tests + clippy + fmt enforced via pre-commit hook (cargo-husky)
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
+```
+
+Recording the demo GIF:
+
+```sh
+brew install vhs        # or: go install github.com/charmbracelet/vhs@latest
+docker compose up -d    # so pgtop has a Postgres + load generator to monitor
+vhs docs/demo.tape      # produces docs/demo.gif
 ```
 
 The `docs/ROADMAP.md` is the source of truth for the development plan.

@@ -487,6 +487,67 @@ WHERE datname IS NOT NULL
 ORDER BY xact_commit + xact_rollback DESC
 ";
 
+/// One row from `pg_stat_user_tables`. `last_vacuum` and `last_analyze`
+/// hold the most recent of the manual / autovacuum timestamps.
+#[derive(Debug, Clone)]
+pub struct TableStat {
+    pub schemaname: String,
+    pub relname: String,
+    pub n_live_tup: i64,
+    pub n_dead_tup: i64,
+    pub last_vacuum: Option<DateTime<Utc>>,
+    pub last_analyze: Option<DateTime<Utc>>,
+    pub seq_scan: i64,
+    pub idx_scan: i64,
+}
+
+impl TableStat {
+    /// Dead tuples as a fraction of total tuples, in percent. Returns
+    /// `None` for an empty relation (no live tuples), where the ratio
+    /// would be undefined / misleading.
+    pub fn dead_pct(&self) -> Option<f64> {
+        let total = self.n_live_tup + self.n_dead_tup;
+        if total > 0 {
+            Some(100.0 * self.n_dead_tup as f64 / total as f64)
+        } else {
+            None
+        }
+    }
+}
+
+const TABLES_QUERY: &str = "
+SELECT
+    schemaname,
+    relname,
+    n_live_tup,
+    n_dead_tup,
+    GREATEST(last_vacuum, last_autovacuum) AS last_vacuum,
+    GREATEST(last_analyze, last_autoanalyze) AS last_analyze,
+    seq_scan,
+    idx_scan
+FROM pg_stat_user_tables
+ORDER BY n_dead_tup DESC NULLS LAST, n_live_tup DESC
+LIMIT 50
+";
+
+/// Snapshot `pg_stat_user_tables`, top 50 tables by dead-tuple count.
+pub async fn fetch_table_stats(client: &Client) -> Result<Vec<TableStat>, DbError> {
+    let rows = client.query(TABLES_QUERY, &[]).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| TableStat {
+            schemaname: row.get("schemaname"),
+            relname: row.get("relname"),
+            n_live_tup: row.get("n_live_tup"),
+            n_dead_tup: row.get("n_dead_tup"),
+            last_vacuum: row.get("last_vacuum"),
+            last_analyze: row.get("last_analyze"),
+            seq_scan: row.get::<_, Option<i64>>("seq_scan").unwrap_or(0),
+            idx_scan: row.get::<_, Option<i64>>("idx_scan").unwrap_or(0),
+        })
+        .collect())
+}
+
 /// Snapshot `pg_stat_database`. The `datname IS NOT NULL` filter skips the
 /// global stats row (shared catalogues / no specific database).
 pub async fn fetch_database_stats(client: &Client) -> Result<Vec<DatabaseStat>, DbError> {

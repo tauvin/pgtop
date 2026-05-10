@@ -18,7 +18,8 @@ use crate::{
     app::{App, ConnectionStatus, Mode, Tab},
     db::TopQueriesSnapshot,
     views::{
-        render_activity, render_databases, render_locks, render_replication, render_top_queries,
+        render_activity, render_databases, render_locks, render_replication, render_tables,
+        render_top_queries,
     },
     widgets::{confirm, detail, filter_line, footer, sparklines, tabs},
 };
@@ -105,6 +106,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Tab::TopQueries => render_top_queries(frame, content_area, app),
         Tab::Replication => render_replication(frame, content_area, app),
         Tab::Databases => render_databases(frame, content_area, app),
+        Tab::Tables => render_tables(frame, content_area, app),
     }
 
     filter_line::render_filter_line(frame, filter_area, app);
@@ -201,6 +203,14 @@ fn tab_suffix(app: &App) -> String {
                 String::new()
             } else {
                 format!("{count} databases")
+            }
+        }
+        Tab::Tables => {
+            let count = conn.tables.len();
+            if count == 0 {
+                String::new()
+            } else {
+                format!("top {count} tables")
             }
         }
     }

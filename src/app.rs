@@ -11,7 +11,7 @@ use regex::{Regex, RegexBuilder};
 use tui_input::{Input, InputRequest};
 
 use crate::actions::ActionResult;
-use crate::db::{Backend, DatabaseStat, Lock, Replica, Stats, TopQueriesSnapshot};
+use crate::db::{Backend, DatabaseStat, Lock, Replica, Stats, TableStat, TopQueriesSnapshot};
 use crate::theme::Theme;
 
 /// Active TUI tab.
@@ -22,6 +22,7 @@ pub enum Tab {
     TopQueries,
     Replication,
     Databases,
+    Tables,
 }
 
 impl Tab {
@@ -32,6 +33,7 @@ impl Tab {
             Tab::TopQueries,
             Tab::Replication,
             Tab::Databases,
+            Tab::Tables,
         ]
     }
 
@@ -42,6 +44,7 @@ impl Tab {
             Self::TopQueries => "Top Queries",
             Self::Replication => "Replication",
             Self::Databases => "Databases",
+            Self::Tables => "Tables",
         }
     }
 
@@ -52,6 +55,7 @@ impl Tab {
             Self::TopQueries => 2,
             Self::Replication => 3,
             Self::Databases => 4,
+            Self::Tables => 5,
         }
     }
 
@@ -218,6 +222,9 @@ pub struct ConnectionState {
     pub databases: Vec<DatabaseStat>,
     pub databases_table_state: TableState,
 
+    pub tables: Vec<TableStat>,
+    pub tables_table_state: TableState,
+
     pub stats: StatsHistory,
 }
 
@@ -249,6 +256,8 @@ impl ConnectionState {
             replication_table_state: TableState::default(),
             databases: Vec::new(),
             databases_table_state: TableState::default(),
+            tables: Vec::new(),
+            tables_table_state: TableState::default(),
             stats: StatsHistory::default(),
         }
     }
@@ -314,6 +323,12 @@ impl ConnectionState {
         self.databases = databases;
         let len = self.databases.len();
         clamp_table_state(&mut self.databases_table_state, len);
+    }
+
+    pub fn set_tables(&mut self, tables: Vec<TableStat>) {
+        self.tables = tables;
+        let len = self.tables.len();
+        clamp_table_state(&mut self.tables_table_state, len);
     }
 
     pub fn push_stats(&mut self, stats: Stats) {
@@ -386,6 +401,16 @@ impl ConnectionState {
                     .map_or(0, |i| i.saturating_sub(1));
                 self.databases_table_state.select(Some(i));
             }
+            Tab::Tables => {
+                if self.tables.is_empty() {
+                    return;
+                }
+                let i = self
+                    .tables_table_state
+                    .selected()
+                    .map_or(0, |i| i.saturating_sub(1));
+                self.tables_table_state.select(Some(i));
+            }
         }
     }
 
@@ -445,6 +470,17 @@ impl ConnectionState {
                     .selected()
                     .map_or(0, |i| (i + 1).min(max));
                 self.databases_table_state.select(Some(i));
+            }
+            Tab::Tables => {
+                if self.tables.is_empty() {
+                    return;
+                }
+                let max = self.tables.len() - 1;
+                let i = self
+                    .tables_table_state
+                    .selected()
+                    .map_or(0, |i| (i + 1).min(max));
+                self.tables_table_state.select(Some(i));
             }
         }
     }

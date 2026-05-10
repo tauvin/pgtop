@@ -54,10 +54,11 @@ pub struct IntervalsConfig {
     pub replication: Option<u64>,
     pub stats: Option<u64>,
     pub databases: Option<u64>,
+    pub tables: Option<u64>,
 }
 
 /// Resolved intervals as `Duration`s. Defaults: activity/locks/stats = 1s,
-/// replication = 5s, databases = 5s, top_queries = 10s.
+/// replication = 5s, databases = 5s, top_queries / tables = 10s.
 #[derive(Debug, Clone, Copy)]
 pub struct Intervals {
     pub activity: Duration,
@@ -66,6 +67,7 @@ pub struct Intervals {
     pub replication: Duration,
     pub stats: Duration,
     pub databases: Duration,
+    pub tables: Duration,
 }
 
 impl Default for Intervals {
@@ -77,6 +79,7 @@ impl Default for Intervals {
             replication: Duration::from_secs(5),
             stats: Duration::from_secs(1),
             databases: Duration::from_secs(5),
+            tables: Duration::from_secs(10),
         }
     }
 }
@@ -100,6 +103,7 @@ impl Intervals {
                 .databases
                 .map(Duration::from_secs)
                 .unwrap_or(d.databases),
+            tables: cfg.tables.map(Duration::from_secs).unwrap_or(d.tables),
         }
     }
 }

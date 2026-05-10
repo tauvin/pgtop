@@ -157,6 +157,13 @@ async fn main() -> Result<()> {
             cancel.clone(),
             intervals.databases,
         )));
+        handles.push(tokio::spawn(collectors::run_tables_collector(
+            dsn.clone(),
+            update_tx.clone(),
+            idx,
+            cancel.clone(),
+            intervals.tables,
+        )));
 
         let (action_tx, action_rx) = mpsc::unbounded_channel::<ActionCommand>();
         handles.push(tokio::spawn(actions::run_action_executor(
@@ -224,6 +231,7 @@ async fn run_event_loop(
                                 KeyCode::Char('3') => app.set_tab(Tab::TopQueries),
                                 KeyCode::Char('4') => app.set_tab(Tab::Replication),
                                 KeyCode::Char('5') => app.set_tab(Tab::Databases),
+                                KeyCode::Char('6') => app.set_tab(Tab::Tables),
                                 KeyCode::Tab => app.next_tab(),
 
                                 KeyCode::Up => app.select_previous(),
@@ -320,6 +328,11 @@ async fn run_event_loop(
                     Some(UpdateMessage::Databases { conn_idx, snapshot }) => {
                         if let Some(conn) = app.connection_mut(conn_idx) {
                             conn.set_databases(snapshot);
+                        }
+                    }
+                    Some(UpdateMessage::Tables { conn_idx, snapshot }) => {
+                        if let Some(conn) = app.connection_mut(conn_idx) {
+                            conn.set_tables(snapshot);
                         }
                     }
                     Some(UpdateMessage::Stats { conn_idx, snapshot }) => {

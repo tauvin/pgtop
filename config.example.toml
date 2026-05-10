@@ -49,3 +49,4 @@ top_queries = 10
 replication = 5
 stats       = 1
 databases   = 5
+tables      = 10

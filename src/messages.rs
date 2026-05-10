@@ -10,6 +10,7 @@
 //! (1Hz × 5 collector'ов × ≤5 connections = ~25 msg/sec) нерелевантно.
 
 use crate::actions::ActionResult;
+use crate::app::ConnectionStatus;
 use crate::db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
 
 /// Тип сообщения от любого collector'а / executor'а к main event loop'у.
@@ -39,5 +40,13 @@ pub enum UpdateMessage {
     ActionResult {
         conn_idx: usize,
         result: ActionResult,
+    },
+    /// Phase 8 Block C: индикатор reconnect-состояния. Публикуется только
+    /// activity collector'ом — он source of truth по health'у соединения.
+    /// Остальные collector'ы тоже реконнектятся, но молча, чтобы не плодить
+    /// конкурирующие status-переходы.
+    Status {
+        conn_idx: usize,
+        status: ConnectionStatus,
     },
 }

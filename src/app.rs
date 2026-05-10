@@ -169,10 +169,27 @@ impl Default for Sort {
     }
 }
 
+/// Статус соединения — Block C индикатор реконнекта. Управляется activity
+/// collector'ом (один источник истины на коннект); остальные коллекторы
+/// реконнектятся молча. UI показывает в title-bar и dim'ит таблицы при не-Connected.
+#[derive(Debug, Clone)]
+pub enum ConnectionStatus {
+    /// Initial connect или reconnect в процессе. `attempt` стартует с 1.
+    Connecting { attempt: u32 },
+    /// Соединение живо и query'и идут.
+    Connected,
+}
+
+impl Default for ConnectionStatus {
+    fn default() -> Self {
+        Self::Connecting { attempt: 1 }
+    }
+}
+
 /// Состояние одного подключения — собственные данные всех табов + identity
 /// (имя, DSN, profile_name, read_only). Phase 8: App хранит вектор таких
 /// состояний, переключение между ними — Alt+N (Block B).
-#[allow(dead_code)] // `name` и `dsn` подключатся в Block B (UI-индикатор + reconnect-логика).
+#[allow(dead_code)] // `name` и `dsn` сейчас не используются в коде, но удобны для отладки/Block C.
 pub struct ConnectionState {
     /// Имя для display в title/footer. Обычно совпадает с profile_name;
     /// для ad-hoc DSN — может быть просто "default" или host-derived.
@@ -181,6 +198,9 @@ pub struct ConnectionState {
     pub read_only: bool,
     pub actions_allowed: bool,
     pub profile_name: Option<String>,
+
+    /// Phase 8 Block C: текущее состояние health'а соединения.
+    pub status: ConnectionStatus,
 
     // Activity tab
     pub backends: Vec<Backend>,
@@ -219,6 +239,7 @@ impl ConnectionState {
             read_only,
             actions_allowed,
             profile_name,
+            status: ConnectionStatus::default(),
             backends: Vec::new(),
             filtered: Vec::new(),
             table_state: TableState::default(),

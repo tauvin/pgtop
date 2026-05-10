@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use tokio_postgres::Client;
 use tokio_util::sync::CancellationToken;
 
+use crate::db;
 use crate::messages::UpdateMessage;
 
 /// Команда для executor'а.
@@ -62,16 +63,24 @@ pub struct ActionResult {
     pub at: DateTime<Utc>,
 }
 
-/// Запустить executor в spawned-таске. Phase 8 Block B: результат публикуется
-/// через shared `mpsc::UnboundedSender<UpdateMessage>` с `conn_idx` —
-/// единая mpsc fan-in архитектура для всех collector'ов и executor'ов.
+/// Запустить executor в spawned-таске. Phase 8 Block C: владеет жизненным
+/// циклом своего Client'а — на старте подключается с backoff'ом, на каждой
+/// команде проверяет `is_closed` и при необходимости реконнектится перед
+/// выполнением. Это даёт правильную семантику: пользователь жмёт `c` после
+/// reconnect'а — команда уйдёт на свежий клиент, а не зафейлится с
+/// "connection closed".
 pub async fn run_action_executor(
-    client: Client,
+    dsn: String,
     mut commands_rx: mpsc::UnboundedReceiver<ActionCommand>,
     update_tx: mpsc::UnboundedSender<UpdateMessage>,
     conn_idx: usize,
     cancel: CancellationToken,
 ) {
+    let mut client = match db::connect_with_backoff(&dsn, &cancel, |_| {}).await {
+        Some(c) => c,
+        None => return,
+    };
+
     loop {
         let cmd = tokio::select! {
             biased;
@@ -81,6 +90,13 @@ pub async fn run_action_executor(
                 None => break,
             },
         };
+
+        if client.is_closed() {
+            client = match db::connect_with_backoff(&dsn, &cancel, |_| {}).await {
+                Some(c) => c,
+                None => return,
+            };
+        }
 
         let outcome = execute(&client, &cmd).await;
         log_audit(&cmd, &outcome);

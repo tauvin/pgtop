@@ -3,9 +3,12 @@
 //! Здесь живёт всё, что знает про SQL и tokio-postgres. Слои выше (collectors / UI)
 //! работают с готовыми структурами `Backend`.
 
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio_postgres::{Client, NoTls, Row};
+use tokio_util::sync::CancellationToken;
 
 /// Ошибки модуля db. `#[from]` генерирует `impl From<tokio_postgres::Error>
 /// for DbError` — отсюда работает `?` на вызовах tokio-postgres.
@@ -108,6 +111,48 @@ pub async fn connect(dsn: &str) -> Result<Client, DbError> {
     let _ = client.execute("SET application_name = 'pgtop'", &[]).await;
 
     Ok(client)
+}
+
+/// Phase 8 Block C: подключиться, бесконечно ретрая с exponential backoff.
+///
+/// Стартовая задержка 500ms, удваивается до cap'а в 30s. `on_attempt`
+/// вызывается ПЕРЕД каждой попыткой с её номером (1-based) — позволяет
+/// активити-коллектору публиковать `ConnectionStatus::Connecting { attempt }`.
+///
+/// Возвращает `None` если cancel-токен сработал в процессе ожидания —
+/// означает graceful shutdown, вызывающий должен `return`.
+pub async fn connect_with_backoff(
+    dsn: &str,
+    cancel: &CancellationToken,
+    mut on_attempt: impl FnMut(u32),
+) -> Option<Client> {
+    let mut delay = Duration::from_millis(500);
+    let max_delay = Duration::from_secs(30);
+    let mut attempt: u32 = 1;
+
+    loop {
+        on_attempt(attempt);
+
+        let connect_result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return None,
+            r = connect(dsn) => r,
+        };
+
+        match connect_result {
+            Ok(client) => return Some(client),
+            Err(e) => {
+                tracing::warn!(attempt, error = %e, "postgres connect failed, will retry");
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return None,
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                delay = (delay * 2).min(max_delay);
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
 }
 
 /// Снимает срез `pg_stat_activity` и собирает его в `Vec<Backend>`.

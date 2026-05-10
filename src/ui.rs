@@ -19,7 +19,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, Mode, Tab},
+    app::{App, ConnectionStatus, Mode, Tab},
     db::TopQueriesSnapshot,
     views::{render_activity, render_locks, render_replication, render_top_queries},
     widgets::{confirm, detail, filter_line, footer, sparklines, tabs},
@@ -157,9 +157,10 @@ fn title_for(app: &App) -> String {
     }
 }
 
-/// `pgtop [· profile] [· RO] [· N/M]` — head-индикаторы. Phase 8 Block B:
-/// `· 1/3` показывается когда соединений больше одного — индекс активного
-/// и общее число, чтобы пользователь видел куда переключился по Alt+N.
+/// `pgtop [· profile] [· RO] [· N/M] [· connecting…]` — head-индикаторы.
+/// Phase 8 Block C: при не-Connected статусе активного соединения добавляем
+/// `· connecting…` (или `· connecting #N…` после первой неудачи) — чтобы
+/// пользователь видел что pgtop живой, но БД пока недоступна.
 fn build_prefix(app: &App) -> String {
     let mut prefix = String::from("pgtop");
     let conn = app.active();
@@ -173,6 +174,13 @@ fn build_prefix(app: &App) -> String {
     let total = app.connections.len();
     if total > 1 {
         prefix.push_str(&format!(" · {}/{}", app.active + 1, total));
+    }
+    if let ConnectionStatus::Connecting { attempt } = conn.status {
+        if attempt <= 1 {
+            prefix.push_str(" · connecting…");
+        } else {
+            prefix.push_str(&format!(" · connecting #{attempt}…"));
+        }
     }
     prefix
 }

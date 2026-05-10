@@ -1,4 +1,6 @@
 //! Сборщик `pg_stat_statements`: 10-секундный интервал, three-state snapshot.
+//!
+//! Phase 8 Block C: silent reconnect.
 
 use std::time::Duration;
 
@@ -6,41 +8,56 @@ use tokio::{
     sync::mpsc,
     time::{MissedTickBehavior, interval},
 };
-use tokio_postgres::Client;
 use tokio_util::sync::CancellationToken;
 
 use crate::db;
 use crate::messages::UpdateMessage;
 
 pub async fn run_top_queries_collector(
-    client: Client,
+    dsn: String,
     tx: mpsc::UnboundedSender<UpdateMessage>,
     conn_idx: usize,
     cancel: CancellationToken,
     poll_interval: Duration,
 ) {
-    let mut ticker = interval(poll_interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => break,
-            _ = ticker.tick() => {}
-        }
-
-        let result = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => break,
-            r = db::fetch_top_queries(&client) => r,
+    'outer: loop {
+        let client = match db::connect_with_backoff(&dsn, &cancel, |_| {}).await {
+            Some(c) => c,
+            None => return,
         };
 
-        if let Ok(snapshot) = result
-            && tx
-                .send(UpdateMessage::TopQueries { conn_idx, snapshot })
-                .is_err()
-        {
-            break;
+        let mut ticker = interval(poll_interval);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                _ = ticker.tick() => {}
+            }
+
+            if client.is_closed() {
+                continue 'outer;
+            }
+
+            let result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                r = db::fetch_top_queries(&client) => r,
+            };
+
+            match result {
+                Ok(snapshot) => {
+                    if tx
+                        .send(UpdateMessage::TopQueries { conn_idx, snapshot })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(_) if client.is_closed() => continue 'outer,
+                Err(_) => {}
+            }
         }
     }
 }

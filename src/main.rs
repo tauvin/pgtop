@@ -125,46 +125,42 @@ async fn main() -> Result<()> {
             resolved.profile_name.clone(),
         ));
 
-        // 6 connections к Postgres на каждый ConnectionState — true parallelism.
-        let dsn = &resolved.dsn;
-        let client_activity = db::connect(dsn).await?;
-        let client_locks = db::connect(dsn).await?;
-        let client_top_queries = db::connect(dsn).await?;
-        let client_replication = db::connect(dsn).await?;
-        let client_stats = db::connect(dsn).await?;
-        let client_actions = db::connect(dsn).await?;
-
+        // Phase 8 Block C: каждый collector / executor сам подключается с
+        // backoff'ом и реконнектится при разрыве. main лишь раздаёт DSN —
+        // не блокируется на стартовом подключении (DB может быть down при
+        // запуске, UI всё равно поднимется и покажет "connecting...").
+        let dsn = resolved.dsn.clone();
         let intervals = &resolved.intervals;
         handles.push(tokio::spawn(collectors::run_activity_collector(
-            client_activity,
+            dsn.clone(),
             update_tx.clone(),
             idx,
             cancel.clone(),
             intervals.activity,
         )));
         handles.push(tokio::spawn(collectors::run_locks_collector(
-            client_locks,
+            dsn.clone(),
             update_tx.clone(),
             idx,
             cancel.clone(),
             intervals.locks,
         )));
         handles.push(tokio::spawn(collectors::run_top_queries_collector(
-            client_top_queries,
+            dsn.clone(),
             update_tx.clone(),
             idx,
             cancel.clone(),
             intervals.top_queries,
         )));
         handles.push(tokio::spawn(collectors::run_replication_collector(
-            client_replication,
+            dsn.clone(),
             update_tx.clone(),
             idx,
             cancel.clone(),
             intervals.replication,
         )));
         handles.push(tokio::spawn(collectors::run_stats_collector(
-            client_stats,
+            dsn.clone(),
             update_tx.clone(),
             idx,
             cancel.clone(),
@@ -174,7 +170,7 @@ async fn main() -> Result<()> {
         // Per-conn action channel: команды от main → executor.
         let (action_tx, action_rx) = mpsc::unbounded_channel::<ActionCommand>();
         handles.push(tokio::spawn(actions::run_action_executor(
-            client_actions,
+            dsn,
             action_rx,
             update_tx.clone(),
             idx,
@@ -380,9 +376,14 @@ async fn run_event_loop(
                         // last_action_result глобальный (один на App). Показываем
                         // только результаты от активного соединения, чтобы не
                         // путать «прислала команду на prod, ушёл на staging,
-                        // увидел результат с prod». Phase 8 Block C — per-conn.
+                        // увидел результат с prod».
                         if conn_idx == app.active {
                             app.set_action_result(result);
+                        }
+                    }
+                    Some(UpdateMessage::Status { conn_idx, status }) => {
+                        if let Some(conn) = app.connection_mut(conn_idx) {
+                            conn.status = status;
                         }
                     }
                 }

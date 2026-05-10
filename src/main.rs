@@ -232,6 +232,7 @@ async fn run_event_loop(
                                 KeyCode::Char('4') => app.set_tab(Tab::Replication),
                                 KeyCode::Char('5') => app.set_tab(Tab::Databases),
                                 KeyCode::Char('6') => app.set_tab(Tab::Tables),
+                                KeyCode::Char('7') => app.set_tab(Tab::Waits),
                                 KeyCode::Tab => app.next_tab(),
 
                                 KeyCode::Up => app.select_previous(),

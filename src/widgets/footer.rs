@@ -55,7 +55,7 @@ fn normal_hints(tab: Tab, actions_allowed: bool, multi_conn: bool) -> Line<'stat
         Span::raw(" "),
         "q".bold(),
         Span::raw(" quit  ·  "),
-        "123456".bold(),
+        "1234567".bold(),
         Span::raw(" tabs  ·  "),
         "↑↓".bold(),
         Span::raw(" move"),

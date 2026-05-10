@@ -2,7 +2,7 @@
 //! global UI state (mode, current tab, theme, last action result).
 
 use std::cmp::Ordering;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -23,6 +23,7 @@ pub enum Tab {
     Replication,
     Databases,
     Tables,
+    Waits,
 }
 
 impl Tab {
@@ -34,6 +35,7 @@ impl Tab {
             Tab::Replication,
             Tab::Databases,
             Tab::Tables,
+            Tab::Waits,
         ]
     }
 
@@ -45,6 +47,7 @@ impl Tab {
             Self::Replication => "Replication",
             Self::Databases => "Databases",
             Self::Tables => "Tables",
+            Self::Waits => "Waits",
         }
     }
 
@@ -56,6 +59,7 @@ impl Tab {
             Self::Replication => 3,
             Self::Databases => 4,
             Self::Tables => 5,
+            Self::Waits => 6,
         }
     }
 
@@ -225,7 +229,20 @@ pub struct ConnectionState {
     pub tables: Vec<TableStat>,
     pub tables_table_state: TableState,
 
+    pub waits: Vec<WaitRow>,
+    pub waits_table_state: TableState,
+
     pub stats: StatsHistory,
+}
+
+/// One aggregated row in the Waits histogram. `count` is how many backends
+/// in the latest activity snapshot were waiting on this `(type, event)`
+/// pair.
+#[derive(Debug, Clone)]
+pub struct WaitRow {
+    pub wait_event_type: String,
+    pub wait_event: String,
+    pub count: u32,
 }
 
 impl ConnectionState {
@@ -258,6 +275,8 @@ impl ConnectionState {
             databases_table_state: TableState::default(),
             tables: Vec::new(),
             tables_table_state: TableState::default(),
+            waits: Vec::new(),
+            waits_table_state: TableState::default(),
             stats: StatsHistory::default(),
         }
     }
@@ -296,6 +315,32 @@ impl ConnectionState {
     pub fn set_backends(&mut self, backends: Vec<Backend>) {
         self.backends = backends;
         self.recompute_filtered();
+        self.recompute_waits();
+    }
+
+    fn recompute_waits(&mut self) {
+        let mut counts: HashMap<(&str, &str), u32> = HashMap::new();
+        for b in &self.backends {
+            if let (Some(t), Some(e)) = (b.wait_event_type.as_deref(), b.wait_event.as_deref()) {
+                *counts.entry((t, e)).or_insert(0) += 1;
+            }
+        }
+        let mut rows: Vec<WaitRow> = counts
+            .into_iter()
+            .map(|((t, e), c)| WaitRow {
+                wait_event_type: t.to_string(),
+                wait_event: e.to_string(),
+                count: c,
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then(a.wait_event_type.cmp(&b.wait_event_type))
+                .then(a.wait_event.cmp(&b.wait_event))
+        });
+        self.waits = rows;
+        clamp_table_state(&mut self.waits_table_state, self.waits.len());
     }
 
     pub fn set_locks(&mut self, locks: Vec<Lock>) {
@@ -411,6 +456,16 @@ impl ConnectionState {
                     .map_or(0, |i| i.saturating_sub(1));
                 self.tables_table_state.select(Some(i));
             }
+            Tab::Waits => {
+                if self.waits.is_empty() {
+                    return;
+                }
+                let i = self
+                    .waits_table_state
+                    .selected()
+                    .map_or(0, |i| i.saturating_sub(1));
+                self.waits_table_state.select(Some(i));
+            }
         }
     }
 
@@ -481,6 +536,17 @@ impl ConnectionState {
                     .selected()
                     .map_or(0, |i| (i + 1).min(max));
                 self.tables_table_state.select(Some(i));
+            }
+            Tab::Waits => {
+                if self.waits.is_empty() {
+                    return;
+                }
+                let max = self.waits.len() - 1;
+                let i = self
+                    .waits_table_state
+                    .selected()
+                    .map_or(0, |i| (i + 1).min(max));
+                self.waits_table_state.select(Some(i));
             }
         }
     }
@@ -964,5 +1030,57 @@ mod tests {
             compare_backends(&a, &b, SortBy::Wait, epoch()),
             Ordering::Less
         );
+    }
+
+    // Waits aggregate
+
+    fn waiting(pid: i32, t: &str, e: &str) -> Backend {
+        let mut b = backend(pid);
+        b.wait_event_type = Some(t.to_string());
+        b.wait_event = Some(e.to_string());
+        b
+    }
+
+    fn conn() -> ConnectionState {
+        ConnectionState::new("t".into(), "".into(), false, false, None)
+    }
+
+    #[test]
+    fn recompute_waits_groups_and_counts() {
+        let mut c = conn();
+        c.set_backends(vec![
+            waiting(1, "Lock", "relation"),
+            waiting(2, "Lock", "relation"),
+            waiting(3, "Client", "ClientRead"),
+            backend(4),
+        ]);
+
+        assert_eq!(c.waits.len(), 2);
+        assert_eq!(c.waits[0].wait_event_type, "Lock");
+        assert_eq!(c.waits[0].wait_event, "relation");
+        assert_eq!(c.waits[0].count, 2);
+        assert_eq!(c.waits[1].wait_event_type, "Client");
+        assert_eq!(c.waits[1].count, 1);
+    }
+
+    #[test]
+    fn recompute_waits_skips_idle_backends() {
+        let mut c = conn();
+        c.set_backends(vec![backend(1), backend(2)]);
+        assert!(c.waits.is_empty());
+    }
+
+    #[test]
+    fn recompute_waits_sorts_by_count_then_alpha() {
+        let mut c = conn();
+        c.set_backends(vec![
+            waiting(1, "Z", "a"),
+            waiting(2, "A", "x"),
+            waiting(3, "A", "x"),
+        ]);
+
+        assert_eq!(c.waits[0].count, 2);
+        assert_eq!(c.waits[0].wait_event_type, "A");
+        assert_eq!(c.waits[1].wait_event_type, "Z");
     }
 }

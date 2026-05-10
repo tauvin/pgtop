@@ -4,7 +4,7 @@
 
 use crate::actions::ActionResult;
 use crate::app::ConnectionStatus;
-use crate::db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
+use crate::db::{Backend, DatabaseStat, Lock, Replica, Stats, TopQueriesSnapshot};
 
 /// Message from any collector or executor to the main event loop.
 /// `conn_idx` selects the `ConnectionState` inside `App.connections`.
@@ -25,6 +25,10 @@ pub enum UpdateMessage {
     Replication {
         conn_idx: usize,
         snapshot: Vec<Replica>,
+    },
+    Databases {
+        conn_idx: usize,
+        snapshot: Vec<DatabaseStat>,
     },
     Stats {
         conn_idx: usize,

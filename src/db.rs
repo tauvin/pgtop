@@ -444,6 +444,68 @@ pub async fn fetch_raw_stats(client: &Client) -> Result<RawStats, DbError> {
     })
 }
 
+/// One row from `pg_stat_database`. Cumulative counters (commits, rollbacks,
+/// blocks, temp_bytes, deadlocks) reflect the value at fetch time, not the
+/// rate over the polling interval.
+#[derive(Debug, Clone)]
+pub struct DatabaseStat {
+    pub datname: String,
+    pub numbackends: i32,
+    pub xact_commit: i64,
+    pub xact_rollback: i64,
+    pub blks_hit: i64,
+    pub blks_read: i64,
+    pub temp_bytes: i64,
+    pub deadlocks: i64,
+}
+
+impl DatabaseStat {
+    /// Cache hit ratio as a percentage. `100.0` for databases with zero
+    /// reads — better default than NaN for an empty/idle database.
+    pub fn cache_hit_pct(&self) -> f64 {
+        let total = self.blks_hit + self.blks_read;
+        if total > 0 {
+            100.0 * self.blks_hit as f64 / total as f64
+        } else {
+            100.0
+        }
+    }
+}
+
+const DATABASES_QUERY: &str = "
+SELECT
+    datname,
+    numbackends,
+    xact_commit,
+    xact_rollback,
+    blks_hit,
+    blks_read,
+    temp_bytes,
+    deadlocks
+FROM pg_stat_database
+WHERE datname IS NOT NULL
+ORDER BY xact_commit + xact_rollback DESC
+";
+
+/// Snapshot `pg_stat_database`. The `datname IS NOT NULL` filter skips the
+/// global stats row (shared catalogues / no specific database).
+pub async fn fetch_database_stats(client: &Client) -> Result<Vec<DatabaseStat>, DbError> {
+    let rows = client.query(DATABASES_QUERY, &[]).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| DatabaseStat {
+            datname: row.get("datname"),
+            numbackends: row.get("numbackends"),
+            xact_commit: row.get("xact_commit"),
+            xact_rollback: row.get("xact_rollback"),
+            blks_hit: row.get("blks_hit"),
+            blks_read: row.get("blks_read"),
+            temp_bytes: row.get("temp_bytes"),
+            deadlocks: row.get("deadlocks"),
+        })
+        .collect())
+}
+
 fn row_to_backend(row: Row) -> Backend {
     Backend {
         pid: row.get("pid"),

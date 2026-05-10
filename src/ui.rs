@@ -17,7 +17,9 @@ use ratatui::{
 use crate::{
     app::{App, ConnectionStatus, Mode, Tab},
     db::TopQueriesSnapshot,
-    views::{render_activity, render_locks, render_replication, render_top_queries},
+    views::{
+        render_activity, render_databases, render_locks, render_replication, render_top_queries,
+    },
     widgets::{confirm, detail, filter_line, footer, sparklines, tabs},
 };
 
@@ -102,6 +104,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Tab::Locks => render_locks(frame, content_area, app),
         Tab::TopQueries => render_top_queries(frame, content_area, app),
         Tab::Replication => render_replication(frame, content_area, app),
+        Tab::Databases => render_databases(frame, content_area, app),
     }
 
     filter_line::render_filter_line(frame, filter_area, app);
@@ -190,6 +193,14 @@ fn tab_suffix(app: &App) -> String {
                 "no replicas".to_string()
             } else {
                 count.to_string()
+            }
+        }
+        Tab::Databases => {
+            let count = conn.databases.len();
+            if count == 0 {
+                String::new()
+            } else {
+                format!("{count} databases")
             }
         }
     }

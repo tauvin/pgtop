@@ -2,11 +2,13 @@
 //! and either `&mut App` or sub-state.
 
 pub mod activity;
+pub mod databases;
 pub mod locks;
 pub mod replication;
 pub mod top_queries;
 
 pub use activity::render_activity;
+pub use databases::render_databases;
 pub use locks::render_locks;
 pub use replication::render_replication;
 pub use top_queries::render_top_queries;

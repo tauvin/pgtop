@@ -48,3 +48,4 @@ locks       = 1
 top_queries = 10
 replication = 5
 stats       = 1
+databases   = 5

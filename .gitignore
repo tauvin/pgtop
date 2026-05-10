@@ -10,5 +10,7 @@
 # secrets / local env
 .env
 
-# claude per-machine settings
+# claude — глобальный gitignore игнорирует .claude/, но skills/ — часть
+# проекта (наши паттерны, ROADMAP-based знания), их хотим коммитить.
+!.claude/
 .claude/settings.local.json

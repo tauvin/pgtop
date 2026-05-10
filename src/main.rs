@@ -1,7 +1,7 @@
 use std::env;
 
 use color_eyre::eyre::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -11,7 +11,7 @@ mod collectors;
 mod db;
 mod ui;
 
-use app::App;
+use app::{App, Mode};
 use db::Backend;
 
 const DEFAULT_DSN: &str = "postgres://pgtop:pgtop@localhost:5433/pgtop";
@@ -98,12 +98,45 @@ async fn run_event_loop(
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                            KeyCode::Up => app.select_previous(),
-                            KeyCode::Down => app.select_next(),
-                            KeyCode::Enter => app.on_enter(),
-                            _ => {}
+                        // Универсальный Ctrl+C перед mode-dispatch'ем: в raw
+                        // mode терминальный драйвер обычно НЕ транслирует
+                        // Ctrl+C в SIGINT (флаг ISIG снят). Поэтому
+                        // `tokio::signal::ctrl_c()` ниже сработает только
+                        // от внешнего `kill -INT`, а от клавиатуры —
+                        // приходит как `Char('c') + CONTROL`. Ловим явно.
+                        if key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            return Ok(());
+                        }
+
+                        // Mode-based dispatch: каждый режим имеет свой keymap.
+                        // `q` универсально выходит (кроме Filter, где `q` —
+                        // обычная буква). `Esc` контекстный.
+                        match &app.mode {
+                            Mode::Normal => match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                                KeyCode::Up => app.select_previous(),
+                                KeyCode::Down => app.select_next(),
+                                KeyCode::Enter => app.on_enter(),
+                                KeyCode::Char('/') => app.enter_filter_mode(),
+                                KeyCode::Char('s') => app.cycle_sort_column(),
+                                KeyCode::Char('S') => app.toggle_sort_direction(),
+                                _ => {}
+                            },
+                            Mode::Detail(_) => match key.code {
+                                KeyCode::Char('q') => return Ok(()),
+                                KeyCode::Esc => app.close_modal(),
+                                _ => {}
+                            },
+                            Mode::Filter => match key.code {
+                                KeyCode::Esc => app.exit_filter_mode(false),
+                                KeyCode::Enter => app.exit_filter_mode(true),
+                                // Всё остальное (буквы, цифры, backspace,
+                                // стрелки курсора, Ctrl+U, Home/End...)
+                                // forward'им в tui-input.
+                                _ => app.handle_filter_input(key),
+                            },
                         }
                     }
                     Some(Ok(_)) => {}

@@ -20,13 +20,7 @@ pub enum DbError {
 /// Правило nullable: если столбец в Postgres допускает NULL — поле `Option<T>`;
 /// если NOT NULL — `T`. `Row::get::<_, T>(...)` **паникует**, если в колонке NULL,
 /// а `T` — не `Option`. Поэтому соответствие SQL ↔ модели обязано быть точным.
-///
-/// `#[allow(dead_code)]`: модель отражает всю выборку; часть полей (например,
-/// `application_name`, `client_addr`, `backend_type`) ещё не отрисовывается
-/// в табличной view (Phase 3), но появится в detail view (Phase 4). Снимать
-/// allow по одному будем по мере подключения полей в render.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Backend {
     pub pid: i32,
     pub datname: Option<String>,

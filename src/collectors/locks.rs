@@ -54,7 +54,12 @@ pub async fn run_locks_collector(
                     }
                 }
                 Err(_) if client.is_closed() => continue 'outer,
-                Err(_) => {}
+                Err(e) => tracing::warn!(
+                    collector = "locks",
+                    conn_idx,
+                    error = %e,
+                    "transient query error, retaining stale data"
+                ),
             }
         }
     }

@@ -54,7 +54,12 @@ pub async fn run_databases_collector(
                     }
                 }
                 Err(_) if client.is_closed() => continue 'outer,
-                Err(_) => {}
+                Err(e) => tracing::warn!(
+                    collector = "databases",
+                    conn_idx,
+                    error = %e,
+                    "transient query error, retaining stale data"
+                ),
             }
         }
     }

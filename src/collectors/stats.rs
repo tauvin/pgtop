@@ -52,7 +52,15 @@ pub async fn run_stats_collector(
             let raw = match result {
                 Ok(r) => r,
                 Err(_) if client.is_closed() => continue 'outer,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!(
+                        collector = "stats",
+                        conn_idx,
+                        error = %e,
+                        "transient query error, retaining stale data"
+                    );
+                    continue;
+                }
             };
 
             let now = Instant::now();

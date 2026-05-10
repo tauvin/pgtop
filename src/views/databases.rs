@@ -48,6 +48,7 @@ fn render_table(
     let header = Row::new([
         "database",
         "conns",
+        "tps",
         "commits",
         "rollbacks",
         "cache hit",
@@ -59,6 +60,7 @@ fn render_table(
     let widths = [
         Constraint::Min(20),
         Constraint::Length(7),
+        Constraint::Length(8),
         Constraint::Length(13),
         Constraint::Length(11),
         Constraint::Length(10),
@@ -79,12 +81,23 @@ fn db_to_row(d: &DatabaseStat) -> Row<'static> {
     Row::new([
         d.datname.clone(),
         d.numbackends.to_string(),
+        format_tps(d.tps),
         format_count(d.xact_commit),
         format_count(d.xact_rollback),
         format!("{:.1}%", d.cache_hit_pct()),
         format_bytes(d.temp_bytes),
         format_count(d.deadlocks),
     ])
+}
+
+fn format_tps(tps: Option<f64>) -> String {
+    match tps {
+        None => "—".to_string(),
+        Some(v) if v < 0.05 => "0".to_string(),
+        Some(v) if v < 10.0 => format!("{v:.1}"),
+        Some(v) if v < 10_000.0 => format!("{v:.0}"),
+        Some(v) => format!("{:.1}K", v / 1_000.0),
+    }
 }
 
 fn format_count(n: i64) -> String {
@@ -158,6 +171,7 @@ mod tests {
             blks_read: 0,
             temp_bytes: 0,
             deadlocks: 0,
+            tps: None,
         };
         assert_eq!(d.cache_hit_pct(), 100.0);
     }
@@ -173,7 +187,17 @@ mod tests {
             blks_read: 1,
             temp_bytes: 0,
             deadlocks: 0,
+            tps: None,
         };
         assert_eq!(d.cache_hit_pct(), 99.0);
+    }
+
+    #[test]
+    fn format_tps_picks_unit() {
+        assert_eq!(format_tps(None), "—");
+        assert_eq!(format_tps(Some(0.0)), "0");
+        assert_eq!(format_tps(Some(2.5)), "2.5");
+        assert_eq!(format_tps(Some(150.0)), "150");
+        assert_eq!(format_tps(Some(12_500.0)), "12.5K");
     }
 }

@@ -542,7 +542,9 @@ pub async fn fetch_raw_stats(client: &Client) -> Result<RawStats, DbError> {
 
 /// One row from `pg_stat_database`. Cumulative counters (commits, rollbacks,
 /// blocks, temp_bytes, deadlocks) reflect the value at fetch time, not the
-/// rate over the polling interval.
+/// rate over the polling interval. `tps` is derived in the collector from
+/// the delta between consecutive snapshots; `None` until two snapshots
+/// have been seen for this database.
 #[derive(Debug, Clone)]
 pub struct DatabaseStat {
     pub datname: String,
@@ -553,6 +555,7 @@ pub struct DatabaseStat {
     pub blks_read: i64,
     pub temp_bytes: i64,
     pub deadlocks: i64,
+    pub tps: Option<f64>,
 }
 
 impl DatabaseStat {
@@ -659,6 +662,7 @@ pub async fn fetch_database_stats(client: &Client) -> Result<Vec<DatabaseStat>, 
             blks_read: row.get("blks_read"),
             temp_bytes: row.get("temp_bytes"),
             deadlocks: row.get("deadlocks"),
+            tps: None,
         })
         .collect())
 }

@@ -274,10 +274,6 @@ impl ConnectionState {
             .and_then(|i| self.backends.get(i))
     }
 
-    pub fn visible_backends(&self) -> impl Iterator<Item = &Backend> + '_ {
-        self.filtered.iter().filter_map(|&i| self.backends.get(i))
-    }
-
     pub fn select_previous(&mut self, tab: Tab) {
         match tab {
             Tab::Activity => {

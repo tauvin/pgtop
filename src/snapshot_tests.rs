@@ -148,6 +148,7 @@ fn databases_tab() {
             blks_read: 100_000,
             temp_bytes: 0,
             deadlocks: 0,
+            tps: Some(125.4),
         },
         DatabaseStat {
             datname: "reports".to_string(),
@@ -158,6 +159,7 @@ fn databases_tab() {
             blks_read: 50_000,
             temp_bytes: 1_048_576,
             deadlocks: 2,
+            tps: None,
         },
     ]);
     let mut app = make_app(conn);

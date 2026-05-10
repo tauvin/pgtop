@@ -1,12 +1,14 @@
 //! Activity tab view: backends table with state/duration colouring and a
 //! sort indicator in the header.
 
+use std::borrow::Cow;
+
 use chrono::{DateTime, Utc};
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
     style::{Modifier, Style},
-    widgets::{Row, Table},
+    widgets::{Cell, Row, Table},
 };
 
 use crate::{
@@ -14,6 +16,8 @@ use crate::{
     db::Backend,
     theme::Theme,
 };
+
+const EM_DASH: &str = "—";
 
 /// Render the Activity tab — a stateful table fed by `ConnectionState`.
 pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) {
@@ -31,8 +35,15 @@ pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App, now: DateTi
     ];
 
     let slow_threshold_secs = conn.slow_query_threshold.as_secs() as i64;
-    let rows: Vec<Row<'static>> = conn
-        .visible_backends()
+    // Disjoint-field borrows: backends/filtered immutably + table_state
+    // mutably is fine because they're different fields of the same struct.
+    // visible_backends() takes &self of the whole struct and would block
+    // the &mut on table_state, hence the inline iteration.
+    let backends = &conn.backends;
+    let rows: Vec<Row<'_>> = conn
+        .filtered
+        .iter()
+        .filter_map(|&i| backends.get(i))
         .map(|b| backend_to_row(b, now, theme, slow_threshold_secs))
         .collect();
 
@@ -67,21 +78,25 @@ fn build_header_row(sort: Sort) -> Row<'static> {
     Row::new(cells).style(Style::new().add_modifier(Modifier::BOLD))
 }
 
-fn backend_to_row(
-    b: &Backend,
+fn backend_to_row<'a>(
+    b: &'a Backend,
     now: DateTime<Utc>,
     theme: Theme,
     slow_threshold_secs: i64,
-) -> Row<'static> {
-    Row::new([
-        b.pid.to_string(),
-        b.usename.clone().unwrap_or_else(em_dash),
-        b.state.clone().unwrap_or_else(em_dash),
-        format_wait(b),
-        format_duration(b.query_start, now),
-        format_query(b.query.as_deref()),
-    ])
-    .style(row_style(b, now, theme, slow_threshold_secs))
+) -> Row<'a> {
+    let cells: [Cell<'a>; 6] = [
+        Cell::from(b.pid.to_string()),
+        Cell::from(borrow_or_dash(b.usename.as_deref())),
+        Cell::from(borrow_or_dash(b.state.as_deref())),
+        Cell::from(format_wait(b)),
+        Cell::from(format_duration(b.query_start, now)),
+        Cell::from(format_query(b.query.as_deref())),
+    ];
+    Row::new(cells).style(row_style(b, now, theme, slow_threshold_secs))
+}
+
+fn borrow_or_dash(field: Option<&str>) -> Cow<'_, str> {
+    field.map_or(Cow::Borrowed(EM_DASH), Cow::Borrowed)
 }
 
 fn row_style(b: &Backend, now: DateTime<Utc>, theme: Theme, slow_threshold_secs: i64) -> Style {
@@ -110,39 +125,35 @@ fn row_style(b: &Backend, now: DateTime<Utc>, theme: Theme, slow_threshold_secs:
     Style::default()
 }
 
-fn format_wait(b: &Backend) -> String {
-    match (&b.wait_event_type, &b.wait_event) {
-        (Some(t), Some(e)) => format!("{t}: {e}"),
-        (Some(t), None) => t.clone(),
-        (None, Some(e)) => e.clone(),
-        (None, None) => em_dash(),
+fn format_wait(b: &Backend) -> Cow<'_, str> {
+    match (b.wait_event_type.as_deref(), b.wait_event.as_deref()) {
+        (Some(t), Some(e)) => Cow::Owned(format!("{t}: {e}")),
+        (Some(t), None) => Cow::Borrowed(t),
+        (None, Some(e)) => Cow::Borrowed(e),
+        (None, None) => Cow::Borrowed(EM_DASH),
     }
 }
 
-fn format_duration(query_start: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+fn format_duration(query_start: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Cow<'static, str> {
     let Some(start) = query_start else {
-        return em_dash();
+        return Cow::Borrowed(EM_DASH);
     };
     let total_secs = (now - start).num_seconds().max(0);
     let h = total_secs / 3600;
     let m = (total_secs % 3600) / 60;
     let s = total_secs % 60;
-    format!("{h}:{m:02}:{s:02}")
+    Cow::Owned(format!("{h}:{m:02}:{s:02}"))
 }
 
-fn format_query(query: Option<&str>) -> String {
+fn format_query(query: Option<&str>) -> Cow<'_, str> {
     let Some(q) = query else {
-        return em_dash();
+        return Cow::Borrowed(EM_DASH);
     };
     let one_line: String = q.split_whitespace().collect::<Vec<_>>().join(" ");
     match one_line.char_indices().nth(60) {
-        Some((cutoff, _)) => format!("{}…", &one_line[..cutoff]),
-        None => one_line,
+        Some((cutoff, _)) => Cow::Owned(format!("{}…", &one_line[..cutoff])),
+        None => Cow::Owned(one_line),
     }
-}
-
-fn em_dash() -> String {
-    "—".to_string()
 }
 
 #[cfg(test)]

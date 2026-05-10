@@ -1,0 +1,28 @@
+---
+source: src/snapshot_tests.rs
+expression: render_snapshot(&mut app)
+---
+"┌ pgtop · test — Activity (3 backends · ⚠ 1 slow) ─────────────────────────────────────────────────────────────────────┐"
+"│ Activity │ Locks │ Top Queries │ Replication │ Databases │ Tables │ Waits                                            │"
+"│ TPS: — ─────────────────────────────── Active: — ───────────────────────────── Cache hit: — ─────────────────────────│"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│pid ▲   user           state                wait            duration   query                                          │"
+"│101     alice          active               —               0:00:05    SELECT * FROM users WHERE id = 1               │"
+"│202     bob            idle in transaction  —               0:02:00    UPDATE accounts SET balance = balance - 1      │"
+"│303     carol          active               Lock: relation  0:00:45    VACUUM ANALYZE big_table                       │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│ q quit  ·  1234567 tabs  ·  ↑↓ move  ·  Enter details  ·  / filter  ·  s/S sort  ·  e explain  ·  g jump             │"
+"└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"

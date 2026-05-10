@@ -1,0 +1,28 @@
+---
+source: src/snapshot_tests.rs
+expression: render_snapshot(&mut app)
+---
+"┌ pgtop · test — Tables (top 2 tables) ────────────────────────────────────────────────────────────────────────────────┐"
+"│ Activity │ Locks │ Top Queries │ Replication │ Databases │ Tables │ Waits                                            │"
+"│ TPS: — ─────────────────────────────── Active: — ───────────────────────────── Cache hit: — ─────────────────────────│"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│table                                                    live     dead     dead %  vacuum   analyze  seq      idx     │"
+"│public.orders                                            1.5M     200.0K   11.8%   2h       30m      42       1.2M    │"
+"│public.users                                             50.0K    100      0.2%    3d       —        5        800.0K  │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│ q quit  ·  1234567 tabs  ·  ↑↓ move                                                                                  │"
+"└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"

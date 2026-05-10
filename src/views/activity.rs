@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// Render the Activity tab — a stateful table fed by `ConnectionState`.
-pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App) {
+pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) {
     let theme = app.theme;
     let conn = app.active_mut();
     let header = build_header_row(conn.sort);
@@ -30,7 +30,6 @@ pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App) {
         Constraint::Min(0),
     ];
 
-    let now = Utc::now();
     let slow_threshold_secs = conn.slow_query_threshold.as_secs() as i64;
     let rows: Vec<Row<'static>> = conn
         .visible_backends()

@@ -49,6 +49,7 @@ regex = "1"
 # (включая `cargo test`). Конкретные команды лежат в .cargo-husky/hooks/pre-commit;
 # user-hooks — отказ от стандартных хуков библиотеки в пользу наших.
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+insta = "1"
 
 [profile.release]
 lto = "thin"

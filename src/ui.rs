@@ -15,7 +15,7 @@ use ratatui::{
     widgets::Block,
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::{
     app::{App, ConnectionState, ConnectionStatus, Mode, Tab},
@@ -78,10 +78,10 @@ fn restore_disciplines() -> io::Result<()> {
 /// Top-level render entry point. Lays out the outer block, tab bar, header
 /// sparklines, tab content, filter line, and footer; renders modal overlays
 /// last.
-pub fn render(frame: &mut Frame, app: &mut App) {
+pub fn render(frame: &mut Frame, app: &mut App, now: DateTime<Utc>) {
     let area = frame.area();
 
-    let title = title_for(app);
+    let title = title_for(app, now);
     let block = Block::bordered().title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -105,12 +105,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     sparklines::render_sparklines(frame, sparklines_area, &app.active().stats);
 
     match app.current_tab {
-        Tab::Activity => render_activity(frame, content_area, app),
+        Tab::Activity => render_activity(frame, content_area, app, now),
         Tab::Locks => render_locks(frame, content_area, app),
         Tab::TopQueries => render_top_queries(frame, content_area, app),
         Tab::Replication => render_replication(frame, content_area, app),
         Tab::Databases => render_databases(frame, content_area, app),
-        Tab::Tables => render_tables(frame, content_area, app),
+        Tab::Tables => render_tables(frame, content_area, app, now),
         Tab::Waits => render_waits(frame, content_area, app),
     }
 
@@ -137,10 +137,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn title_for(app: &App) -> String {
+fn title_for(app: &App, now: DateTime<Utc>) -> String {
     let prefix = build_prefix(app);
     let tab = app.current_tab.label();
-    let suffix = tab_suffix(app);
+    let suffix = tab_suffix(app, now);
     if suffix.is_empty() {
         format!(" {prefix} — {tab} ")
     } else {
@@ -172,13 +172,13 @@ fn build_prefix(app: &App) -> String {
     prefix
 }
 
-fn tab_suffix(app: &App) -> String {
+fn tab_suffix(app: &App, now: DateTime<Utc>) -> String {
     let conn = app.active();
     match app.current_tab {
         Tab::Activity => {
             let visible = conn.filtered.len();
             let total = conn.backends.len();
-            let slow = count_slow(conn);
+            let slow = count_slow(conn, now);
             let base = if visible == total {
                 format!("{total} backends")
             } else {
@@ -238,8 +238,7 @@ fn tab_suffix(app: &App) -> String {
     }
 }
 
-fn count_slow(conn: &ConnectionState) -> usize {
-    let now = Utc::now();
+fn count_slow(conn: &ConnectionState, now: DateTime<Utc>) -> usize {
     let threshold_secs = conn.slow_query_threshold.as_secs() as i64;
     conn.backends
         .iter()

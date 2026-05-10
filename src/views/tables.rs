@@ -11,12 +11,12 @@ use ratatui::{
 
 use crate::{app::App, db::TableStat};
 
-pub fn render_tables(frame: &mut Frame, area: Rect, app: &mut App) {
+pub fn render_tables(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) {
     let conn = app.active_mut();
     if conn.tables.is_empty() {
         render_empty(frame, area);
     } else {
-        render_table(frame, area, &conn.tables, &mut conn.tables_table_state);
+        render_table(frame, area, &conn.tables, &mut conn.tables_table_state, now);
     }
 }
 
@@ -34,7 +34,13 @@ fn render_empty(frame: &mut Frame, area: Rect) {
     frame.render_widget(para, area);
 }
 
-fn render_table(frame: &mut Frame, area: Rect, tables: &[TableStat], table_state: &mut TableState) {
+fn render_table(
+    frame: &mut Frame,
+    area: Rect,
+    tables: &[TableStat],
+    table_state: &mut TableState,
+    now: DateTime<Utc>,
+) {
     let header_style = Style::new().add_modifier(Modifier::BOLD);
     let header = Row::new([
         "table", "live", "dead", "dead %", "vacuum", "analyze", "seq", "idx",
@@ -52,7 +58,6 @@ fn render_table(frame: &mut Frame, area: Rect, tables: &[TableStat], table_state
         Constraint::Length(8),
     ];
 
-    let now = Utc::now();
     let rows: Vec<Row<'static>> = tables.iter().map(|t| table_to_row(t, now)).collect();
 
     let table = Table::new(rows, widths)

@@ -24,6 +24,9 @@ mod ui;
 mod views;
 mod widgets;
 
+#[cfg(test)]
+mod snapshot_tests;
+
 use actions::ActionCommand;
 use app::{App, ConnectionState, ExplainPopup, Mode, Tab};
 use config::Resolved;
@@ -231,7 +234,8 @@ async fn run_event_loop(
     let mut events = EventStream::new();
 
     loop {
-        terminal.draw(|frame| ui::render(frame, app))?;
+        let now = chrono::Utc::now();
+        terminal.draw(|frame| ui::render(frame, app, now))?;
 
         tokio::select! {
             maybe_event = events.next() => {

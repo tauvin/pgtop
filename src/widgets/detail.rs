@@ -1,5 +1,5 @@
-//! Detail-popup для выбранного backend'а: центрированный overlay поверх
-//! таблицы. Рисуется, когда `Mode::Detail(pid)` активен.
+//! Detail popup for the selected backend, drawn while `Mode::Detail(pid)` is
+//! active.
 
 use chrono::{DateTime, Utc};
 use ratatui::{
@@ -12,9 +12,7 @@ use ratatui::{
 
 use crate::db::Backend;
 
-/// Центрированный popup: 80% ширины × 70% высоты. `Clear` widget
-/// «прокалывает дыру» в фоне — иначе symbols таблицы просвечивали бы
-/// под содержимым popup'а. Идиоматический ratatui-паттерн.
+/// Render the centered detail popup for one backend.
 pub fn render_detail(frame: &mut Frame, area: Rect, b: &Backend) {
     let popup = centered_rect(80, 70, area);
 
@@ -29,8 +27,6 @@ pub fn render_detail(frame: &mut Frame, area: Rect, b: &Backend) {
     frame.render_widget(para, inner);
 }
 
-/// Группы разделены пустыми Line — визуальные «секции»:
-/// connection / state / timing / xid / query.
 fn build_detail_lines(b: &Backend) -> Vec<Line<'static>> {
     vec![
         kv("user", b.usename.as_deref()),
@@ -82,9 +78,6 @@ fn em_dash() -> String {
     "—".to_string()
 }
 
-/// Центрированный прямоугольник заданного процента от `area`. Двойной
-/// Layout-split: вертикально на 3 (sides + middle), потом среднюю —
-/// горизонтально на 3.
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let [_, mid_v, _] = Layout::vertical([
         Constraint::Percentage((100 - percent_y) / 2),

@@ -1,11 +1,6 @@
-//! Сборщик `pg_stat_activity`: опрашивает раз в секунду, публикует
-//! `Vec<Backend>` через shared `mpsc::UnboundedSender<UpdateMessage>`.
-//!
-//! Phase 8 Block C: владеет жизненным циклом своего Client'а. На любой
-//! ошибке/закрытии переходит в outer-loop reconnect с exponential backoff,
-//! публикуя `ConnectionStatus::Connecting { attempt }`. После успешного
-//! reconnect'а посылает `Connected`. Это единственный коллектор, который
-//! публикует Status — остальные реконнектятся молча.
+//! `pg_stat_activity` collector. Owns its connection lifecycle and reconnects
+//! with exponential backoff. The only collector that publishes
+//! `ConnectionStatus` updates; others reconnect silently.
 
 use std::time::Duration;
 
@@ -27,8 +22,6 @@ pub async fn run_activity_collector(
     poll_interval: Duration,
 ) {
     'outer: loop {
-        // Reconnect-loop с публикацией Connecting{attempt}. Закрытие через
-        // cancel — тогда `connect_with_backoff` вернёт None.
         let tx_for_status = tx.clone();
         let client = match db::connect_with_backoff(&dsn, &cancel, move |attempt| {
             let _ = tx_for_status.send(UpdateMessage::Status {
@@ -62,9 +55,6 @@ pub async fn run_activity_collector(
                 _ = ticker.tick() => {}
             }
 
-            // is_closed — проверка драйвера: его background-task завершилась
-            // (TCP RST, server shutdown, idle timeout). После true все query'и
-            // сразу вернут Err — реконнектимся, не дожидаясь fetch'а.
             if client.is_closed() {
                 continue 'outer;
             }
@@ -85,11 +75,7 @@ pub async fn run_activity_collector(
                     }
                 }
                 Err(_) if client.is_closed() => continue 'outer,
-                Err(_) => {
-                    // Транзиентная ошибка (вряд ли для read-only pg_stat_*),
-                    // но не закрытое соединение — оставляем клиент, ретраим
-                    // на следующем тике.
-                }
+                Err(_) => {}
             }
         }
     }

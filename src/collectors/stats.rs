@@ -1,10 +1,6 @@
-//! Сборщик сводных метрик для шапки: TPS, active connections, cache hit %.
-//! Stateful — держит prev-snapshot для diff'а TPS.
-//!
-//! Phase 8 Block C: silent reconnect. На реконнекте сбрасываем prev-state —
-//! diff между до-disconnect и после был бы бессмысленным (counter Postgres
-//! не сбрасывается, но временной разрыв >> poll_interval даст ложно-низкий
-//! TPS на первом тике после reconnect'а).
+//! Header summary metrics collector: TPS, active connections, cache hit %.
+//! Stateful — keeps the previous snapshot to compute the TPS delta. Resets
+//! its previous-state on reconnect.
 
 use std::time::{Duration, Instant};
 
@@ -33,7 +29,6 @@ pub async fn run_stats_collector(
         let mut ticker = interval(poll_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        // Per-connection-instance state: на reconnect'е стартуем с None.
         let mut prev_xacts: Option<i64> = None;
         let mut prev_time: Option<Instant> = None;
 

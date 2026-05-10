@@ -25,9 +25,6 @@ use app::{App, ConnectionState, Mode, Tab};
 use config::Resolved;
 use messages::UpdateMessage;
 
-/// CLI-аргументы. Phase 8 Block B: `profiles: Vec<String>` для multi-conn —
-/// `pgtop prod staging local` открывает 3 подключения, переключение
-/// `Alt+1`/`Alt+2`/`Alt+3`.
 #[derive(Debug, Parser)]
 #[command(
     name = "pgtop",
@@ -62,12 +59,8 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
 
-    // Phase 7: загрузить TOML-конфиг.
     let config = config::load()?;
 
-    // Phase 8 Block B: resolve по N профилям (или single default если
-    // `cli.profiles` пуст). Каждый получает свои read_only/actions_allowed
-    // и DSN с layered'ом CLI > env > profile > defaults.
     let resolveds: Vec<Resolved> = if cli.profiles.is_empty() {
         vec![Resolved::from_layers(
             &config,
@@ -98,20 +91,15 @@ async fn main() -> Result<()> {
         "pgtop starting"
     );
 
-    // Phase 8 Block B: shared mpsc fan-in. Все collector'ы и executor'ы
-    // публикуют через один update_tx; main имеет один update_rx. UpdateMessage
-    // несёт `conn_idx` для адресации правильного ConnectionState.
     let (update_tx, update_rx) = mpsc::unbounded_channel::<UpdateMessage>();
     let cancel = CancellationToken::new();
 
-    // Per-connection: свой набор клиентов, action_tx, 6 spawn'нутых задач.
     let mut connections: Vec<ConnectionState> = Vec::with_capacity(resolveds.len());
     let mut action_txs: Vec<mpsc::UnboundedSender<ActionCommand>> =
         Vec::with_capacity(resolveds.len());
     let mut handles = Vec::new();
 
     for (idx, resolved) in resolveds.iter().enumerate() {
-        // Имя для UI: profile_name либо "default" для безпрофильного запуска.
         let name = resolved
             .profile_name
             .clone()
@@ -125,10 +113,6 @@ async fn main() -> Result<()> {
             resolved.profile_name.clone(),
         ));
 
-        // Phase 8 Block C: каждый collector / executor сам подключается с
-        // backoff'ом и реконнектится при разрыве. main лишь раздаёт DSN —
-        // не блокируется на стартовом подключении (DB может быть down при
-        // запуске, UI всё равно поднимется и покажет "connecting...").
         let dsn = resolved.dsn.clone();
         let intervals = &resolved.intervals;
         handles.push(tokio::spawn(collectors::run_activity_collector(
@@ -167,7 +151,6 @@ async fn main() -> Result<()> {
             intervals.stats,
         )));
 
-        // Per-conn action channel: команды от main → executor.
         let (action_tx, action_rx) = mpsc::unbounded_channel::<ActionCommand>();
         handles.push(tokio::spawn(actions::run_action_executor(
             dsn,
@@ -179,9 +162,6 @@ async fn main() -> Result<()> {
         action_txs.push(action_tx);
     }
 
-    // Дропаем оригинал update_tx — у нас только клоны в spawn'нутых задачах.
-    // Когда все задачи завершатся (cancel'ом), все клоны дропнутся → receiver
-    // увидит None. Без этого drop'а receiver не закроется даже после shutdown'а.
     drop(update_tx);
 
     let mut app = App::new(connections);
@@ -192,18 +172,12 @@ async fn main() -> Result<()> {
     drop(term);
     cancel.cancel();
 
-    // Ждём все handle'ы — может быть много (6N). futures::future::join_all для
-    // динамической Vec'и handle'ов; `let _ =` глушит JoinError'ы.
     let _ = futures::future::join_all(handles).await;
 
     loop_result
 }
 
-/// Async event loop: render → ждём первое событие → реагируем → повторяем.
-///
-/// Phase 8 Block B: каналы упростились — один `update_rx` ловит сообщения
-/// от ВСЕХ collector'ов и executor'ов всех соединений. `action_txs` — Vec
-/// per-conn, индексируется `app.active`.
+/// Async event loop: render, await events, dispatch.
 async fn run_event_loop(
     terminal: &mut ui::Tui,
     app: &mut App,
@@ -216,22 +190,15 @@ async fn run_event_loop(
         terminal.draw(|frame| ui::render(frame, app))?;
 
         tokio::select! {
-            // Гард `kind == Press` отсекает дубликаты на терминалах
-            // с kitty keyboard protocol.
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        // Универсальный Ctrl+C перед mode-dispatch'ем.
                         if key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                         {
                             return Ok(());
                         }
 
-                        // Phase 8 Block B: универсальный Alt+digit — переключение
-                        // активного соединения. Идёт ДО mode-dispatch'а, чтобы
-                        // работало даже из Detail/Filter/Confirm — переключение
-                        // соединения сбрасывает Mode в Normal (см. set_active).
                         if key.modifiers.contains(KeyModifiers::ALT)
                             && let KeyCode::Char(c) = key.code
                             && let Some(d) = c.to_digit(10)
@@ -241,27 +208,19 @@ async fn run_event_loop(
                             continue;
                         }
 
-                        // Mode-based dispatch: каждый режим имеет свой keymap.
-                        // `q` универсально выходит (кроме Filter, где `q` —
-                        // обычная буква). `Esc` контекстный.
                         match &app.mode {
                             Mode::Normal => match key.code {
-                                // Универсальный quit (любой таб).
                                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
 
-                                // Tab switching (любой таб).
                                 KeyCode::Char('1') => app.set_tab(Tab::Activity),
                                 KeyCode::Char('2') => app.set_tab(Tab::Locks),
                                 KeyCode::Char('3') => app.set_tab(Tab::TopQueries),
                                 KeyCode::Char('4') => app.set_tab(Tab::Replication),
                                 KeyCode::Tab => app.next_tab(),
 
-                                // ↑↓ работают на любом табе с навигацией: select_previous/next
-                                // сами диспатчат по current_tab (no-op на табах без list).
                                 KeyCode::Up => app.select_previous(),
                                 KeyCode::Down => app.select_next(),
 
-                                // Enter (Detail view) пока только в Activity.
                                 KeyCode::Enter if app.current_tab == Tab::Activity => {
                                     app.on_enter()
                                 }
@@ -274,16 +233,9 @@ async fn run_event_loop(
                                 KeyCode::Char('S') if app.current_tab == Tab::Activity => {
                                     app.toggle_sort_direction()
                                 }
-                                // `c` (Activity, --allow-actions, не self):
-                                // открыть confirm-cancel модалку.
                                 KeyCode::Char('c') => {
                                     app.try_open_confirm_cancel();
                                 }
-                                // `K` (Shift+k) — terminate с type-yes-confirm.
-                                // Crossterm на большинстве терминалов
-                                // прислывает заглавную букву как Char('K')
-                                // (с modifier SHIFT или без — зависит от
-                                // терминала). Match только на код символа.
                                 KeyCode::Char('K') => {
                                     app.try_open_confirm_terminate();
                                 }
@@ -297,18 +249,12 @@ async fn run_event_loop(
                             Mode::Filter => match key.code {
                                 KeyCode::Esc => app.exit_filter_mode(false),
                                 KeyCode::Enter => app.exit_filter_mode(true),
-                                // Всё остальное (буквы, цифры, backspace,
-                                // стрелки курсора, Ctrl+U, Home/End...)
-                                // forward'им в tui-input.
                                 _ => app.handle_filter_input(key),
                             },
                             Mode::ConfirmCancel(pid) => match key.code {
                                 KeyCode::Enter => {
                                     let pid = *pid;
                                     let active = app.active;
-                                    // Команда уходит executor'у активного
-                                    // соединения; результат прилетит через
-                                    // shared update_rx с conn_idx.
                                     let _ = action_txs[active]
                                         .send(ActionCommand::Cancel { pid });
                                     app.close_modal();
@@ -337,13 +283,9 @@ async fn run_event_loop(
                 }
             }
 
-            // Phase 8 Block B: единая ветка mpsc fan-in. UpdateMessage
-            // адресует ConnectionState через `conn_idx`. Modal-cleanup
-            // (Detail/Confirm на исчезнувший pid) делается только если
-            // обновление пришло на активный коннект.
             msg = update_rx.recv() => {
                 match msg {
-                    None => return Ok(()),  // все senders дропнуты
+                    None => return Ok(()),
                     Some(UpdateMessage::Activity { conn_idx, snapshot }) => {
                         if let Some(conn) = app.connection_mut(conn_idx) {
                             conn.set_backends(snapshot);
@@ -373,10 +315,6 @@ async fn run_event_loop(
                         }
                     }
                     Some(UpdateMessage::ActionResult { conn_idx, result }) => {
-                        // last_action_result глобальный (один на App). Показываем
-                        // только результаты от активного соединения, чтобы не
-                        // путать «прислала команду на prod, ушёл на staging,
-                        // увидел результат с prod».
                         if conn_idx == app.active {
                             app.set_action_result(result);
                         }
@@ -394,26 +332,13 @@ async fn run_event_loop(
     }
 }
 
-/// Tracing → файл в XDG-state-директории, не stdout/stderr (TUI владеет
-/// терминалом). Returns `WorkerGuard` — non-blocking writer запускает фоновый
-/// поток-writer, guard управляет его жизнью. Дропать guard слишком рано =
-/// терять последние записи (background-writer не успеет flush'нуть).
-/// Поэтому держим до конца main.
-///
-/// Phase 7: переезд с `~/.pgtop/pgtop.log` на XDG state dir
-/// (`~/.local/state/pgtop/pgtop.log` на Linux). Override через `PGTOP_LOG_DIR`
-/// для testing/CI/контейнеров где home filesystem read-only.
-///
-/// Audit-инфа про cancel/terminate-actions летит сюда через
-/// `tracing::info!(target: "audit", ...)`. Фильтр RUST_LOG позволяет
-/// раздельно настроить уровни для audit и других target'ов
-/// (`RUST_LOG=audit=info`).
+/// Initialise tracing to a log file in the XDG state directory. Returns the
+/// `WorkerGuard` for the non-blocking writer; must be held until the end of
+/// `main` so background-flushed records aren't lost.
 fn init_audit_log() -> Result<tracing_appender::non_blocking::WorkerGuard> {
     let log_dir = resolve_log_dir();
     std::fs::create_dir_all(&log_dir).wrap_err("create pgtop log dir")?;
 
-    // `never` — не ротируем: для TUI-сессий длиной в часы-дни overkill.
-    // `daily` пригодится если станет актуально (long-running mode).
     let file_appender = tracing_appender::rolling::never(&log_dir, "pgtop.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -422,28 +347,19 @@ fn init_audit_log() -> Result<tracing_appender::non_blocking::WorkerGuard> {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
-        // Без ANSI-кодов в файле — иначе grep будет ловить escape-символы.
         .with_ansi(false)
         .init();
 
     Ok(guard)
 }
 
-/// XDG-resolved путь для log-файла:
-/// - **Linux**: `$XDG_STATE_HOME/pgtop` или `$HOME/.local/state/pgtop`.
-/// - **macOS**: `state_dir` отсутствует у Apple → fallback на
-///   `data_local_dir` (`~/Library/Application Support/pgtop`).
-/// - **Windows**: то же — `state_dir` нет, идём в
-///   `dirs::data_local_dir()` (`%LOCALAPPDATA%\pgtop`).
-/// - **Override**: `PGTOP_LOG_DIR` env — для CI/тестов/read-only-home сценариев.
-/// - **Last resort**: `./pgtop` относительно cwd.
+/// Resolve the directory used for the pgtop log file. Honours
+/// `PGTOP_LOG_DIR`, then XDG state dir, then platform fallbacks.
 fn resolve_log_dir() -> PathBuf {
-    // Override env имеет наивысший приоритет.
     if let Ok(custom) = env::var("PGTOP_LOG_DIR") {
         return PathBuf::from(custom);
     }
 
-    // Стандартный chain: XDG state → XDG data_local → fallback на $HOME/.local/state.
     dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("state")))

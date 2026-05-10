@@ -1,15 +1,7 @@
-//! Конфиг и резолвинг параметров запуска.
+//! Configuration loading and runtime parameter resolution.
 //!
-//! Layered loading (lowest → highest priority):
-//! 1. Hardcoded defaults (`DEFAULT_DSN`, все флаги off).
-//! 2. Profile из TOML-файла (`~/.config/pgtop/config.toml`).
-//! 3. `DATABASE_URL` env (legacy/CI-friendly).
-//! 4. CLI-флаги (`--dsn`, `--read-only`, `--allow-actions`).
-//!
-//! `figment` используется для file-loading с хорошими ошибками (file:line). Для
-//! env+CLI — ручная логика, потому что nested HashMap из figment-Env требует
-//! awkward `PGTOP_PROFILES__LOCAL__DSN` синтаксиса; проще переопределять
-//! resolved-поля сразу.
+//! Layered priority (lowest → highest): hardcoded defaults, profile from
+//! `~/.config/pgtop/config.toml`, `DATABASE_URL` env, CLI flags.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,39 +16,36 @@ use serde::Deserialize;
 
 use crate::theme::Theme;
 
-/// Default DSN если ни профиль, ни env, ни CLI ничего не задали.
+/// Default DSN used when nothing else specifies one.
 pub const DEFAULT_DSN: &str = "postgres://pgtop:pgtop@localhost:5433/pgtop";
 
-/// Top-level конфиг — то, что лежит в `~/.config/pgtop/config.toml`.
+/// Top-level config loaded from `~/.config/pgtop/config.toml`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
-    /// Имя профиля для использования если CLI не передал явный.
-    /// `None` → используем DSN из env / CLI / `DEFAULT_DSN`.
+    /// Profile to use when the CLI does not pick one. `None` falls back to
+    /// env / CLI / `DEFAULT_DSN`.
     pub default_profile: Option<String>,
 
-    /// `[profiles.<name>]`-секции из TOML.
-    /// `#[serde(default)]` → пустой HashMap при отсутствии секции.
+    /// `[profiles.<name>]` sections from TOML.
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
 
-    /// Phase 7: UI-настройки — пока только тема.
     #[serde(default)]
     pub ui: UiConfig,
 
-    /// Phase 7: интервалы опроса по collector'ам, в секундах.
+    /// Poll intervals per collector.
     #[serde(default)]
     pub intervals: IntervalsConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UiConfig {
-    /// Имя темы: `"dark"` (default) или `"light"`. Unknown name → fallback
-    /// на `dark` без ошибки.
+    /// Theme name: `"dark"` (default) or `"light"`. Unknown name falls back
+    /// to dark.
     pub theme: Option<String>,
 }
 
-/// Интервалы опроса в **секундах**. None в любом поле = использовать
-/// hardcoded дефолт. Полная overrideability на per-collector basis.
+/// Poll intervals in **seconds**. `None` keeps the hardcoded default.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct IntervalsConfig {
     pub activity: Option<u64>,
@@ -66,8 +55,8 @@ pub struct IntervalsConfig {
     pub stats: Option<u64>,
 }
 
-/// Resolved intervals — `Duration` готовые к передаче collector'ам.
-/// Defaults: activity/locks/stats = 1s, replication = 5s, top_queries = 10s.
+/// Resolved intervals as `Duration`s. Defaults: activity/locks/stats = 1s,
+/// replication = 5s, top_queries = 10s.
 #[derive(Debug, Clone, Copy)]
 pub struct Intervals {
     pub activity: Duration,
@@ -90,8 +79,6 @@ impl Default for Intervals {
 }
 
 impl Intervals {
-    /// Применить config-overrides поверх дефолтов. Каждое `Some(n)` →
-    /// `Duration::from_secs(n)`; `None` → дефолт остаётся.
     fn from_config(cfg: &IntervalsConfig) -> Self {
         let d = Self::default();
         Self {
@@ -110,33 +97,29 @@ impl Intervals {
     }
 }
 
-/// Один именованный профиль подключения.
+/// One named connection profile.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Profile {
     pub dsn: Option<String>,
-    /// Если true — forces `actions_allowed = false` независимо от
-    /// `--allow-actions`. Безопасный «seal» для prod-профилей.
+    /// When true, forces `actions_allowed = false` regardless of
+    /// `--allow-actions` — a safe seal for prod profiles.
     #[serde(default)]
     pub read_only: bool,
 }
 
-/// Финальный набор runtime-параметров после применения всех layer'ов.
-/// Это то, что main передаёт дальше в App / db::connect / executor.
+/// Final runtime parameters after applying every layer.
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub dsn: String,
     pub actions_allowed: bool,
     pub read_only: bool,
-    /// Имя выбранного профиля (если был) — для отображения в title-bar.
+    /// Selected profile name, if any — shown in the title bar.
     pub profile_name: Option<String>,
-    /// Resolved-тема (из `config.ui.theme`).
     pub theme: Theme,
-    /// Resolved-интервалы (из `config.intervals` поверх дефолтов).
     pub intervals: Intervals,
 }
 
-/// Путь к конфигу: `$XDG_CONFIG_HOME/pgtop/config.toml` (через `dirs`).
-/// Fallback на cwd если HOME нет — для CI-сценариев.
+/// Path to the config file (`$XDG_CONFIG_HOME/pgtop/config.toml`).
 pub fn config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -144,8 +127,8 @@ pub fn config_path() -> PathBuf {
         .join("config.toml")
 }
 
-/// Загрузить конфиг через figment. Если файла нет — возвращаем дефолт-конфиг
-/// (без профилей). figment даёт хорошие ошибки парсинга (с line:column).
+/// Load the config from disk. Returns the default config if the file is
+/// missing.
 pub fn load() -> Result<Config> {
     let path = config_path();
     if !path.exists() {
@@ -158,15 +141,11 @@ pub fn load() -> Result<Config> {
 }
 
 impl Resolved {
-    /// Свести все layer'ы в финальные значения.
+    /// Combine all layers into final values.
     ///
-    /// - **DSN**: CLI `--dsn` > env `DATABASE_URL` > profile.dsn > `DEFAULT_DSN`.
-    /// - **read_only**: CLI `--read-only` ∨ profile.read_only.
-    /// - **actions_allowed**: CLI `--allow-actions` ∧ ¬read_only.
-    ///
-    /// Read-only — «sticky off» для actions: если хоть один источник установил
-    /// read_only, actions выключены даже при явном `--allow-actions`. Это анти-fool
-    /// для случая «прокинул prod-профиль и забыл, что флаг включён».
+    /// - DSN: CLI `--dsn` > env `DATABASE_URL` > `profile.dsn` > `DEFAULT_DSN`.
+    /// - `read_only`: CLI `--read-only` ∨ `profile.read_only`.
+    /// - `actions_allowed`: CLI `--allow-actions` ∧ ¬read_only.
     pub fn from_layers(
         config: &Config,
         cli_profile: Option<&str>,
@@ -174,13 +153,10 @@ impl Resolved {
         cli_allow_actions: bool,
         cli_read_only: bool,
     ) -> Result<Self> {
-        // 1. Выбор профиля: CLI > config.default_profile > None.
         let profile_name = cli_profile
             .map(str::to_string)
             .or_else(|| config.default_profile.clone());
 
-        // 2. Получить Profile (или default если имя не задано).
-        // Если имя задано но не найдено — фейлим явно с ошибкой.
         let profile = match &profile_name {
             Some(name) => config.profiles.get(name).cloned().ok_or_else(|| {
                 let available: Vec<&str> = config.profiles.keys().map(String::as_str).collect();
@@ -192,20 +168,16 @@ impl Resolved {
             None => Profile::default(),
         };
 
-        // 3. DSN-resolution в порядке убывания приоритета.
         let dsn = cli_dsn
             .map(str::to_string)
             .or_else(|| std::env::var("DATABASE_URL").ok())
             .or(profile.dsn)
             .unwrap_or_else(|| DEFAULT_DSN.to_string());
 
-        // 4. read_only: OR двух источников; никогда не «снимается» CLI'ем.
         let read_only = cli_read_only || profile.read_only;
 
-        // 5. actions_allowed: CLI-флаг, но read_only гасит.
         let actions_allowed = cli_allow_actions && !read_only;
 
-        // 6. Theme — name-based; unknown → dark.
         let theme = config
             .ui
             .theme
@@ -213,7 +185,6 @@ impl Resolved {
             .map(Theme::from_name)
             .unwrap_or_default();
 
-        // 7. Intervals — config overlay поверх дефолтов.
         let intervals = Intervals::from_config(&config.intervals);
 
         Ok(Self {

@@ -1,17 +1,6 @@
-//! Action executor — отдельная tokio-task, исполняющая cancel/terminate-команды
-//! на дедикейтед-соединении.
-//!
-//! Архитектура:
-//! - main task шлёт `ActionCommand` через mpsc::UnboundedSender (try_send,
-//!   не-блокирующий — event loop не блокируется на ожидании).
-//! - executor читает команды из mpsc::UnboundedReceiver.
-//! - SQL выполняется на собственном `Client` (отдельное соединение) —
-//!   не сериализуется через collector-driver'ы.
-//! - результат публикуется в watch::channel<Option<ActionResult>>.
-//! - main task ловит `result_rx.changed()` в select! и обновляет UI.
-//!
-//! Все события логируются через `tracing` с `target: "audit"` — в audit-log
-//! файл попадают timestamp + команда + результат.
+//! Action executor: a separate tokio task that runs cancel/terminate
+//! commands on a dedicated Postgres connection. All events are logged via
+//! `tracing` with `target: "audit"`.
 
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
@@ -21,12 +10,12 @@ use tokio_util::sync::CancellationToken;
 use crate::db;
 use crate::messages::UpdateMessage;
 
-/// Команда для executor'а.
+/// A command for the executor.
 #[derive(Debug, Clone)]
 pub enum ActionCommand {
-    /// `pg_cancel_backend(pid)` — отменяет текущий запрос; сессия остаётся.
+    /// `pg_cancel_backend(pid)` — cancels the current query, keeps the session.
     Cancel { pid: i32 },
-    /// `pg_terminate_backend(pid)` — обрывает всю сессию.
+    /// `pg_terminate_backend(pid)` — kills the entire session.
     Terminate { pid: i32 },
 }
 
@@ -45,30 +34,23 @@ impl ActionCommand {
     }
 }
 
-/// Результат исполнения action'а — то, что executor публикует в UI.
+/// Result of executing an action, published to the UI.
 ///
 /// `outcome`:
-/// - `Ok(true)` — `pg_cancel_backend` вернул `true`: сигнал успешно послан.
-/// - `Ok(false)` — `pg_cancel_backend` вернул `false`: pid не существует
-///   ИЛИ у нас нет привилегии. Postgres не различает эти два случая
-///   в возвращаемом значении.
-/// - `Err(String)` — собственно SQL-ошибка (соединение, синтаксис, и т.п.).
+/// - `Ok(true)` — the function returned `true`: the signal was sent.
+/// - `Ok(false)` — the function returned `false`: pid does not exist or the
+///   caller lacks privilege. Postgres does not distinguish these two cases.
+/// - `Err(String)` — a SQL error (connection, syntax, etc.).
 #[derive(Debug, Clone)]
 pub struct ActionResult {
     pub command: ActionCommand,
     pub outcome: Result<bool, String>,
-    /// Timestamp выполнения. UI пока не отображает (Phase 7 — relative
-    /// «N ago»), но в логах audit-target видно через Debug-форматирование.
     #[allow(dead_code)]
     pub at: DateTime<Utc>,
 }
 
-/// Запустить executor в spawned-таске. Phase 8 Block C: владеет жизненным
-/// циклом своего Client'а — на старте подключается с backoff'ом, на каждой
-/// команде проверяет `is_closed` и при необходимости реконнектится перед
-/// выполнением. Это даёт правильную семантику: пользователь жмёт `c` после
-/// reconnect'а — команда уйдёт на свежий клиент, а не зафейлится с
-/// "connection closed".
+/// Run the action executor on a spawned task. Owns its connection: connects
+/// with backoff on startup and reconnects on demand if the client closed.
 pub async fn run_action_executor(
     dsn: String,
     mut commands_rx: mpsc::UnboundedReceiver<ActionCommand>,
@@ -129,9 +111,6 @@ async fn execute(client: &Client, cmd: &ActionCommand) -> Result<bool, String> {
     Ok(row.get(0))
 }
 
-/// Audit-event в файл: уровень info при success, warn при выполненной но
-/// безрезультатной команде (false), error при SQL-ошибке.
-/// `target: "audit"` позволяет фильтровать через RUST_LOG=audit=info отдельно.
 fn log_audit(cmd: &ActionCommand, outcome: &Result<bool, String>) {
     match outcome {
         Ok(true) => tracing::info!(

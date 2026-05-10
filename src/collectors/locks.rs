@@ -1,7 +1,4 @@
-//! Сборщик `pg_locks`: 2-секундный интервал.
-//!
-//! Phase 8 Block C: silent reconnect. Status-сообщения публикует только
-//! activity collector — здесь логируем и тихо ретраимся.
+//! `pg_locks` collector. Reconnects silently on connection loss.
 
 use std::time::Duration;
 

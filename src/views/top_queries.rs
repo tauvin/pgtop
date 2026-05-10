@@ -1,6 +1,5 @@
-//! Top Queries tab view: либо таблица топ-запросов, либо инструкция
-//! как поставить `pg_stat_statements`, либо «загружается» — в зависимости
-//! от `TopQueriesSnapshot`.
+//! Top Queries tab view: a table of top queries, install instructions when
+//! `pg_stat_statements` is missing, or a loading placeholder.
 
 use ratatui::{
     Frame,
@@ -16,9 +15,6 @@ use crate::{
 };
 
 pub fn render_top_queries(frame: &mut Frame, area: Rect, app: &mut App) {
-    // Phase 8: данные per-connection. Берём конкретный &mut ConnectionState
-    // первым — на нём disjoint field borrows работают (match на immut поле +
-    // mut на другое поле — компилятор пропускает).
     let conn = app.active_mut();
     match &conn.top_queries {
         TopQueriesSnapshot::Loading => render_loading(frame, area),
@@ -34,9 +30,6 @@ fn render_loading(frame: &mut Frame, area: Rect) {
     frame.render_widget(para, area);
 }
 
-/// Helpful instructions с конкретными командами для установки расширения.
-/// Полезнее чем просто «расширение не установлено» — пользователь сразу видит,
-/// что нужно сделать.
 fn render_extension_missing(frame: &mut Frame, area: Rect) {
     let text = Text::from(vec![
         Line::from(""),
@@ -114,9 +107,6 @@ fn render_available(
     frame.render_stateful_widget(table, area, table_state);
 }
 
-/// `TopQuery` → `Row<'static>`. Числа right-padded для визуального выравнивания
-/// колонок (ratatui-Table сам не умеет per-cell alignment, поэтому делаем
-/// форматированием строки).
 fn top_query_to_row(q: &TopQuery) -> Row<'static> {
     Row::new([
         format!("{:>10}", q.calls),

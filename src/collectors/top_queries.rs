@@ -1,6 +1,4 @@
-//! Сборщик `pg_stat_statements`: 10-секундный интервал, three-state snapshot.
-//!
-//! Phase 8 Block C: silent reconnect.
+//! `pg_stat_statements` collector. Reconnects silently on connection loss.
 
 use std::time::Duration;
 

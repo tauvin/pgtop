@@ -1,5 +1,5 @@
-//! Render-функции для каждого таба. Каждый view получает `Frame`, область
-//! `Rect` и `&mut App` (или подсостояние), отрисовывает в эту область.
+//! Per-tab render functions. Each view receives a `Frame`, target `Rect`,
+//! and either `&mut App` or sub-state.
 
 pub mod activity;
 pub mod locks;

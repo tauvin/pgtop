@@ -1,7 +1,4 @@
-//! Sparkline-полоса в шапке: TPS / Active connections / Cache hit %.
-//!
-//! Три sparkline'а side-by-side, каждый с top-border'ом, в title которого
-//! зашита текущая величина. Использует `ratatui::widgets::Sparkline`.
+//! Header sparklines: TPS, active connections, cache hit %.
 
 use std::collections::VecDeque;
 
@@ -14,9 +11,8 @@ use ratatui::{
 
 use crate::app::StatsHistory;
 
-/// Render header-sparklines в `area` высотой ≥ 3 (1 строка border+title +
-/// 2 строки bars). Если `history.current == None` (ещё нет снимка),
-/// рисуются пустые рамки с прочерками.
+/// Render three side-by-side sparklines into `area`. `area` should be at
+/// least three rows tall (top border + bars).
 pub fn render_sparklines(frame: &mut Frame, area: Rect, history: &StatsHistory) {
     let [tps_area, conns_area, cache_area] = Layout::horizontal([
         Constraint::Ratio(1, 3),
@@ -36,10 +32,6 @@ fn render_tps(frame: &mut Frame, area: Rect, history: &StatsHistory) {
         None => " TPS: — ".to_string(),
     };
 
-    // TPS часто <10 (на наш load-generator); умножаем на 10 перед truncate'ом
-    // в u64, чтобы дробные значения формировали видимые столбцы. Sparkline
-    // auto-max адаптируется под максимум в данных, поэтому масштабирование
-    // не искажает форму графика.
     let data: Vec<u64> = history
         .tps
         .iter()
@@ -61,7 +53,6 @@ fn render_conns(frame: &mut Frame, area: Rect, history: &StatsHistory) {
         None => " Active: — ".to_string(),
     };
 
-    // u32 → u64. Без умножения: значения уже целые и обычно >= 0.
     let data: Vec<u64> = history.conns.iter().map(|&v| v as u64).collect();
 
     let block = Block::default().borders(Borders::TOP).title(title);
@@ -79,8 +70,6 @@ fn render_cache_hit(frame: &mut Frame, area: Rect, history: &StatsHistory) {
         None => " Cache hit: — ".to_string(),
     };
 
-    // 0..100, без скейлинга. Фиксируем max=100 чтобы 99% не выглядело как
-    // «забит», когда диапазон стабилизировался.
     let data: Vec<u64> = history
         .cache_hit
         .iter()
@@ -97,9 +86,6 @@ fn render_cache_hit(frame: &mut Frame, area: Rect, history: &StatsHistory) {
     frame.render_widget(sparkline, area);
 }
 
-/// Заглушка — пока не используется, но может пригодиться для других metric'ов
-/// в Phase 6+. Выносить общий `render_sparkline_metric` overengineering для 3
-/// разных типов данных (f64+scale, u32, f64-percentage), поэтому пока 3 hand-rolled.
 #[allow(dead_code)]
 pub(super) fn _to_u64<T: Copy + Into<u64>>(buf: &VecDeque<T>) -> Vec<u64> {
     buf.iter().copied().map(|v| v.into()).collect()

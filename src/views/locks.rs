@@ -1,4 +1,4 @@
-//! Locks tab view: таблица блокировок с цветовой пометкой waiting-локов.
+//! Locks tab view: lock table with waiting locks highlighted.
 
 use ratatui::{
     Frame,
@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::{app::App, db::Lock, theme::Theme};
 
-/// Контент Locks таба: таблица из `app.locks`, индексируемая `app.locks_table_state`.
+/// Render the Locks tab.
 pub fn render_locks(frame: &mut Frame, area: Rect, app: &mut App) {
     let header_style = Style::new().add_modifier(Modifier::BOLD);
     let header = Row::new(["pid", "type", "mode", "✓", "object"]).style(header_style);
@@ -37,8 +37,6 @@ pub fn render_locks(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_stateful_widget(table, area, &mut app.active_mut().locks_table_state);
 }
 
-/// `Lock` → `Row<'static>`. Waiting-локи (granted=false) подсвечиваем
-/// `theme.danger` — типичный сигнал contention'а для мониторинга.
 fn lock_to_row(l: &Lock, theme: Theme) -> Row<'static> {
     let granted_marker = if l.granted { "✓" } else { "⏳" };
 

@@ -1,9 +1,6 @@
-//! Фоновые задачи, опрашивающие Postgres и публикующие снапшоты в watch-каналы.
-//!
-//! Каждый сборщик — отдельный модуль с одной публичной функцией
-//! `run_X_collector(client, tx, cancel)`. Phase 5 расширяет набор от единственного
-//! `activity` до Activity / Locks / Top Queries / Replication / Stats — каждый
-//! со своим интервалом и snapshot-типом.
+//! Background tasks that poll Postgres and publish snapshots over a shared
+//! `mpsc` channel. Each collector lives in its own submodule with a single
+//! `run_*_collector` entry point.
 
 pub mod activity;
 pub mod locks;

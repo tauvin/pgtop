@@ -1,5 +1,4 @@
-//! Footer с подсказками хоткеев. Mode-aware и tab-aware: в Activity показывает
-//! полный набор хоткеев, на других табах — упрощённый.
+//! Footer with keymap hints. Mode- and tab-aware.
 
 use ratatui::{
     Frame,
@@ -51,10 +50,6 @@ pub fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(footer, area);
 }
 
-/// Хинты для Normal mode зависят от current_tab. ↑↓-нав работает везде
-/// (select_previous/next сами no-op для табов без list); Activity получает
-/// расширенный набор (Enter/filter/sort). Phase 8 Block B: при multi-conn
-/// показываем Alt+N подсказку для переключения соединений.
 fn normal_hints(tab: Tab, actions_allowed: bool, multi_conn: bool) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = vec![
         Span::raw(" "),
@@ -94,7 +89,6 @@ fn normal_hints(tab: Tab, actions_allowed: bool, multi_conn: bool) -> Line<'stat
             ]);
         }
     } else if actions_allowed {
-        // На не-Activity табах — просто индикатор режима.
         spans.extend([Span::raw("  ·  "), "actions".bold().yellow()]);
     }
 

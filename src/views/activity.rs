@@ -1,5 +1,5 @@
-//! Activity tab view: таблица backend'ов с цветовой подсветкой по
-//! state/duration и индикатором сортировки в header'е.
+//! Activity tab view: backends table with state/duration colouring and a
+//! sort indicator in the header.
 
 use chrono::{DateTime, Utc};
 use ratatui::{
@@ -15,9 +15,7 @@ use crate::{
     theme::Theme,
 };
 
-/// Контент Activity таба: stateful Table с TableState из App.
-/// `now` зафиксирован один раз на кадр для консистентности duration во всех
-/// строках и для не-нарушения Ord в потенциально вложенных сортировках.
+/// Render the Activity tab — a stateful table fed by `ConnectionState`.
 pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     let theme = app.theme;
     let conn = app.active_mut();
@@ -33,9 +31,6 @@ pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     ];
 
     let now = Utc::now();
-    // Собираем в Vec явно: иначе immutable borrow от `conn.visible_backends()`
-    // тянется до конца Table::new(...) и мешает mutable borrow на
-    // `&mut conn.table_state` ниже.
     let rows: Vec<Row<'static>> = conn
         .visible_backends()
         .map(|b| backend_to_row(b, now, theme))
@@ -48,7 +43,6 @@ pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_stateful_widget(table, area, &mut conn.table_state);
 }
 
-/// Header с индикатором текущей сортировки (`▲`/`▼` после имени активной колонки).
 fn build_header_row(sort: Sort) -> Row<'static> {
     const COLUMNS: [SortBy; 6] = [
         SortBy::Pid,
@@ -85,14 +79,6 @@ fn backend_to_row(b: &Backend, now: DateTime<Utc>, theme: Theme) -> Row<'static>
     .style(row_style(b, now, theme))
 }
 
-/// Стиль строки исходя из state и duration активного запроса.
-/// Приоритет: self > danger > warning > success > default.
-/// - **Self** (pgtop собственное соединение): `theme.muted` — отдельный
-///   визуальный класс, чтобы пользователь видел «это я и cancel'ить нельзя».
-/// - **danger**: active-запрос дольше 10с (визуальный сигнал «долгий»).
-/// - **warning**: idle in transaction (потенциально удерживает локи / vacuum).
-/// - **success**: обычный active (≤10с).
-/// - Default: idle-сессии, fastpath function call и т.п.
 fn row_style(b: &Backend, now: DateTime<Utc>, theme: Theme) -> Style {
     const LONG_QUERY_THRESHOLD_SECS: i64 = 10;
 

@@ -1,5 +1,5 @@
-//! Переиспользуемые композиции виджетов: компоненты UI, не привязанные
-//! к конкретному табу (вкладочное меню, footer, filter-line, detail-popup).
+//! Reusable UI components shared across tabs (tab bar, footer, filter line,
+//! detail and confirm popups, sparklines).
 
 pub mod confirm;
 pub mod detail;

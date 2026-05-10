@@ -1,9 +1,5 @@
-//! Состояние приложения, которое переживает между кадрами.
-//!
-//! Phase 8 block A: per-connection state переехал в `ConnectionState`.
-//! `App` хранит `Vec<ConnectionState>` + активный индекс. Глобальные
-//! UI-вещи (mode, tab, theme, last_action_result) остаются на App.
-//! Single-conn режим = `connections.len() == 1`, поведение прежнее.
+//! Application state shared across frames. Owns per-connection state plus
+//! global UI state (mode, current tab, theme, last action result).
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -18,8 +14,7 @@ use crate::actions::ActionResult;
 use crate::db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
 use crate::theme::Theme;
 
-/// Активный таб TUI. Каждый таб — отдельный «view» с собственными данными
-/// и хоткеями.
+/// Active TUI tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Activity,
@@ -56,10 +51,8 @@ impl Tab {
     }
 }
 
-/// Модальные состояния UI. Глобальные (один Mode на всё приложение, не
-/// per-connection) — модалка открыта поверх всего, какое бы соединение ни
-/// было активно. При переключении соединения Mode сбрасывается в Normal
-/// (см. `App::set_active`).
+/// Modal UI state. Global across the app — switching connections resets
+/// `Mode` to `Normal` (see `App::set_active`).
 #[derive(Debug, Clone)]
 pub enum Mode {
     Normal,
@@ -169,14 +162,13 @@ impl Default for Sort {
     }
 }
 
-/// Статус соединения — Block C индикатор реконнекта. Управляется activity
-/// collector'ом (один источник истины на коннект); остальные коллекторы
-/// реконнектятся молча. UI показывает в title-bar и dim'ит таблицы при не-Connected.
+/// Connection health indicator. Owned by the activity collector — other
+/// collectors reconnect silently.
 #[derive(Debug, Clone)]
 pub enum ConnectionStatus {
-    /// Initial connect или reconnect в процессе. `attempt` стартует с 1.
+    /// Initial connect or reconnect in progress. `attempt` is 1-based.
     Connecting { attempt: u32 },
-    /// Соединение живо и query'и идут.
+    /// Connection is alive and queries are flowing.
     Connected,
 }
 
@@ -186,42 +178,34 @@ impl Default for ConnectionStatus {
     }
 }
 
-/// Состояние одного подключения — собственные данные всех табов + identity
-/// (имя, DSN, profile_name, read_only). Phase 8: App хранит вектор таких
-/// состояний, переключение между ними — Alt+N (Block B).
-#[allow(dead_code)] // `name` и `dsn` сейчас не используются в коде, но удобны для отладки/Block C.
+/// Per-connection state: identity, health, and tab-specific data.
+#[allow(dead_code)]
 pub struct ConnectionState {
-    /// Имя для display в title/footer. Обычно совпадает с profile_name;
-    /// для ad-hoc DSN — может быть просто "default" или host-derived.
+    /// Display name (usually the profile name; "default" otherwise).
     pub name: String,
     pub dsn: String,
     pub read_only: bool,
     pub actions_allowed: bool,
     pub profile_name: Option<String>,
 
-    /// Phase 8 Block C: текущее состояние health'а соединения.
+    /// Current health of the connection.
     pub status: ConnectionStatus,
 
-    // Activity tab
     pub backends: Vec<Backend>,
     pub filtered: Vec<usize>,
     pub table_state: TableState,
     pub filter: Filter,
     pub sort: Sort,
 
-    // Locks tab
     pub locks: Vec<Lock>,
     pub locks_table_state: TableState,
 
-    // Top Queries tab
     pub top_queries: TopQueriesSnapshot,
     pub top_queries_table_state: TableState,
 
-    // Replication tab
     pub replication: Vec<Replica>,
     pub replication_table_state: TableState,
 
-    // Header sparklines
     pub stats: StatsHistory,
 }
 
@@ -255,8 +239,6 @@ impl ConnectionState {
         }
     }
 
-    /// Пересобрать `filtered`-индексы (фильтр + сортировка) и поправить
-    /// selection под новый размер.
     fn recompute_filtered(&mut self) {
         self.filtered = self
             .backends
@@ -329,8 +311,6 @@ impl ConnectionState {
         self.filtered.iter().filter_map(|&i| self.backends.get(i))
     }
 
-    /// Сдвиг выделения вверх. Принимает `tab` потому что разные табы используют
-    /// разные `TableState` поля.
     pub fn select_previous(&mut self, tab: Tab) {
         match tab {
             Tab::Activity => {
@@ -454,12 +434,11 @@ impl ConnectionState {
     }
 }
 
-/// Корневое состояние приложения. Phase 8: данные per-connection живут в
-/// `connections[active]`. Глобальные UI-вещи (mode/tab/theme/result) на App.
+/// Root application state.
 pub struct App {
     pub connections: Vec<ConnectionState>,
-    /// Индекс активного соединения. Гарантирован валидным —
-    /// `set_active` clamps; конструктор требует non-empty Vec.
+    /// Index of the active connection. Always valid — `set_active` clamps and
+    /// the constructor requires a non-empty `Vec`.
     pub active: usize,
 
     pub mode: Mode,
@@ -469,8 +448,7 @@ pub struct App {
 }
 
 impl App {
-    /// Требует non-empty `connections`. Panic если пустой — это invariant
-    /// уровня архитектуры, проверяется в main.rs до вызова.
+    /// Requires a non-empty `connections`. Panics otherwise.
     pub fn new(connections: Vec<ConnectionState>) -> Self {
         assert!(
             !connections.is_empty(),
@@ -494,17 +472,14 @@ impl App {
         &mut self.connections[self.active]
     }
 
-    /// Получить connection по индексу — для adressing'а сообщений из
-    /// collector'ов конкретному соединению (Phase 8 Block B).
-    #[allow(dead_code)] // wired up in Block B
+    #[allow(dead_code)]
     pub fn connection_mut(&mut self, idx: usize) -> Option<&mut ConnectionState> {
         self.connections.get_mut(idx)
     }
 
-    /// Set active connection by index. Out-of-bounds → no-op.
-    /// Сбрасывает Mode в Normal — модалки привязаны к конкретному соединению,
-    /// при переключении они теряют смысл.
-    #[allow(dead_code)] // wired up in Block B (Alt+N hotkeys)
+    /// Set the active connection by index. Out-of-bounds is a no-op.
+    /// Resets `Mode` to `Normal`.
+    #[allow(dead_code)]
     pub fn set_active(&mut self, idx: usize) {
         if idx < self.connections.len() && idx != self.active {
             self.active = idx;
@@ -512,10 +487,8 @@ impl App {
         }
     }
 
-    /// Закрыть модалку, если её pid исчез из активного соединения.
-    /// Phase 8 Block B: вызывается из main после `connection_mut(idx).set_backends`,
-    /// но только если `idx == app.active` — иначе модалка не относится к
-    /// обновляемому коннекту.
+    /// Close the active modal if its pid is no longer present in the active
+    /// connection's backends.
     pub fn maybe_close_dead_modal(&mut self) {
         let active_pid = match &self.mode {
             Mode::Detail(pid) | Mode::ConfirmCancel(pid) => Some(*pid),
@@ -654,9 +627,6 @@ impl App {
     }
 }
 
-/// Helper: `clamp_table_state` для не-Activity табов (локs/replication/top_queries
-/// — нет filtered-проекции, list напрямую). Activity использует свой clamp в
-/// `recompute_filtered` (там есть filter+sort).
 fn clamp_table_state(state: &mut TableState, len: usize) {
     match state.selected() {
         _ if len == 0 => state.select(None),
@@ -666,8 +636,8 @@ fn clamp_table_state(state: &mut TableState, len: usize) {
     }
 }
 
-/// Ring-буферы для sparkline'ов в шапке + последний снапшот для отображения
-/// текущего значения. Per-connection (часть ConnectionState).
+/// Ring buffers for header sparklines plus the latest snapshot for current
+/// values. Per-connection.
 pub struct StatsHistory {
     pub tps: VecDeque<f64>,
     pub conns: VecDeque<u32>,

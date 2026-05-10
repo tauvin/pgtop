@@ -1,20 +1,13 @@
-//! Phase 8 Block B: shared update-channel для multi-connection mode.
-//!
-//! Каждый collector / executor publishes свой snapshot через единый
-//! `mpsc::UnboundedSender<UpdateMessage>` с `conn_idx`-полем, идентифицирующим
-//! целевое соединение. main task держит единственный `Receiver` и в `select!`
-//! имеет одну ветку на все updates вместо 5N (5 каналов × N connections).
-//!
-//! Trade-off vs watch (Phase 5-7): теряем latest-wins coalescing — если UI
-//! отстал, snapshot'ы могут накопиться в очереди. Для нашего масштаба
-//! (1Hz × 5 collector'ов × ≤5 connections = ~25 msg/sec) нерелевантно.
+//! Shared `UpdateMessage` channel for multi-connection mode. Every collector
+//! and executor publishes through one `mpsc` sender; `conn_idx` addresses
+//! the target connection.
 
 use crate::actions::ActionResult;
 use crate::app::ConnectionStatus;
 use crate::db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
 
-/// Тип сообщения от любого collector'а / executor'а к main event loop'у.
-/// `conn_idx` адресует ConnectionState внутри `App.connections`.
+/// Message from any collector or executor to the main event loop.
+/// `conn_idx` selects the `ConnectionState` inside `App.connections`.
 #[derive(Debug)]
 pub enum UpdateMessage {
     Activity {
@@ -41,10 +34,7 @@ pub enum UpdateMessage {
         conn_idx: usize,
         result: ActionResult,
     },
-    /// Phase 8 Block C: индикатор reconnect-состояния. Публикуется только
-    /// activity collector'ом — он source of truth по health'у соединения.
-    /// Остальные collector'ы тоже реконнектятся, но молча, чтобы не плодить
-    /// конкурирующие status-переходы.
+    /// Reconnect-state indicator. Published only by the activity collector.
     Status {
         conn_idx: usize,
         status: ConnectionStatus,

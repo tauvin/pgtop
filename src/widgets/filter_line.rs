@@ -1,5 +1,4 @@
-//! Filter status line — между контентом и footer'ом. 1 строка высотой,
-//! рисуется (или нет) в зависимости от `Mode` и наличия активного фильтра.
+//! Filter status line drawn between content and footer.
 
 use ratatui::{
     Frame,
@@ -15,14 +14,9 @@ use crate::actions::{ActionCommand, ActionResult};
 use crate::app::{App, Mode};
 use crate::theme::Theme;
 
-/// Показывает (по приоритету):
-/// 1. В `Mode::Filter`: `/`-prompt + текущий ввод + cursor + invalid-индикатор.
-/// 2. Если фильтр активен (regex Some) и не Filter mode: dim-строка `filter: pattern`.
-/// 3. Если есть `last_action_result`: статус последней action-команды.
-/// 4. Иначе пусто.
-///
-/// Filter имеет приоритет над action-result'ом, потому что при наборе фильтра
-/// пользователь активно набирает — статус не должен мешать.
+/// Render the filter line. Shows (in priority order): the filter prompt in
+/// `Mode::Filter`, the active filter pattern, the last action result, or
+/// nothing.
 pub fn render_filter_line(frame: &mut Frame, area: Rect, app: &App) {
     let conn = app.active();
     let line = if matches!(app.mode, Mode::Filter) {
@@ -60,11 +54,6 @@ fn filter_status_line(conn: &crate::app::ConnectionState) -> Line<'static> {
     ])
 }
 
-/// Цветовое кодирование результата (через theme):
-/// - Ok(true) → `theme.success` «✓ ok».
-/// - Ok(false) → `theme.warning` «no-op» — функция вернула false (нет
-///   такого pid'а или нет permission'ов).
-/// - Err → `theme.danger` — SQL-ошибка.
 fn action_result_line(result: &ActionResult, theme: Theme) -> Line<'static> {
     let pid = result.command.pid();
     let action = result.command.label();
@@ -84,7 +73,5 @@ fn action_result_line(result: &ActionResult, theme: Theme) -> Line<'static> {
     ])
 }
 
-// `ActionCommand` импортируется только для проверки доступности;
-// форматирование делает `label()`/`pid()`. Просто чтобы не было unused warning.
 #[allow(dead_code)]
 fn _force_action_command_use(_: &ActionCommand) {}

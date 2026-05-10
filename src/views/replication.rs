@@ -1,5 +1,4 @@
-//! Replication tab view: таблица streaming-реплик или empty-state, если
-//! реплик нет (типичная ситуация для одиночного сервера).
+//! Replication tab view: streaming replicas table or an empty-state hint.
 
 use ratatui::{
     Frame,
@@ -25,16 +24,15 @@ pub fn render_replication(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// Empty-state: ни одной активной реплики (типично для одиночного сервера).
 fn render_empty(frame: &mut Frame, area: Rect) {
     let text = Text::from(vec![
         Line::from(""),
         Line::from(vec!["  ".into(), "No active replicas.".bold()]),
         Line::from(""),
         Line::from("  pg_stat_replication shows clients connected via streaming"),
-        Line::from("  replication: stand-by реплики, pg_basebackup-сессии и т.п."),
-        Line::from("  Эта таблица пуста по умолчанию — записи появляются, когда"),
-        Line::from("  репликационный клиент подключается к этому серверу."),
+        Line::from("  replication: standby replicas, pg_basebackup sessions, etc."),
+        Line::from("  This table is empty by default — entries appear when a"),
+        Line::from("  replication client connects to this server."),
     ]);
 
     let para = Paragraph::new(text).wrap(Wrap { trim: false });
@@ -82,7 +80,6 @@ fn replica_to_row(r: &Replica) -> Row<'static> {
     ])
 }
 
-/// Lag в секундах → компактная строка `1.2s` / `45.0s` / `—`.
 fn format_lag(secs: Option<f64>) -> String {
     match secs {
         Some(s) => format!("{s:.1}s"),

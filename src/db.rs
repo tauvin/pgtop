@@ -1,7 +1,5 @@
-//! Низкоуровневый слой работы с Postgres: подключение и выборка `pg_stat_activity`.
-//!
-//! Здесь живёт всё, что знает про SQL и tokio-postgres. Слои выше (collectors / UI)
-//! работают с готовыми структурами `Backend`.
+//! Low-level Postgres access: connection setup and `pg_stat_*` queries.
+//! Higher layers (collectors, UI) consume the typed structs defined here.
 
 use std::time::Duration;
 
@@ -10,31 +8,25 @@ use thiserror::Error;
 use tokio_postgres::{Client, NoTls, Row};
 use tokio_util::sync::CancellationToken;
 
-/// Ошибки модуля db. `#[from]` генерирует `impl From<tokio_postgres::Error>
-/// for DbError` — отсюда работает `?` на вызовах tokio-postgres.
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("postgres error: {0}")]
     Postgres(#[from] tokio_postgres::Error),
 }
 
-/// Подмножество полей `pg_stat_activity`, нужное pgtop.
-///
-/// Правило nullable: если столбец в Postgres допускает NULL — поле `Option<T>`;
-/// если NOT NULL — `T`. `Row::get::<_, T>(...)` **паникует**, если в колонке NULL,
-/// а `T` — не `Option`. Поэтому соответствие SQL ↔ модели обязано быть точным.
+/// Subset of `pg_stat_activity` columns consumed by pgtop. Nullable columns
+/// in Postgres are mapped to `Option<T>`; reading a NULL into a non-Option
+/// would panic.
 #[derive(Debug, Clone)]
 pub struct Backend {
     pub pid: i32,
     pub datname: Option<String>,
     pub usename: Option<String>,
     pub application_name: Option<String>,
-    /// `inet` имеет свой бинарный формат; чтобы не тянуть лишний крейт (`cidr`/`ipnet`)
-    /// под FromSql, в SQL делаем `client_addr::text` и принимаем как `String`.
+    /// Cast to text in SQL to avoid the inet binary format dependency.
     pub client_addr: Option<String>,
-    /// По доке `pg_stat_activity.backend_start` NOT NULL, но в реальности
-    /// бывает NULL для некоторых служебных backend'ов (checkpointer,
-    /// walreceiver, walwriter в момент инициализации). На проде встречается.
+    /// Documented as NOT NULL but observed NULL in the wild for some
+    /// background workers during init.
     pub backend_start: Option<DateTime<Utc>>,
     pub xact_start: Option<DateTime<Utc>>,
     pub query_start: Option<DateTime<Utc>>,
@@ -42,8 +34,7 @@ pub struct Backend {
     pub wait_event_type: Option<String>,
     pub wait_event: Option<String>,
     pub state: Option<String>,
-    /// `xid` — 32-битный счётчик транзакций со своим SQL-типом. Кастуем к text,
-    /// чтобы не привязываться к доп. feature-флагам tokio-postgres для xid.
+    /// Cast to text to avoid the xid type dependency.
     pub backend_xid: Option<String>,
     pub backend_xmin: Option<String>,
     pub query: Option<String>,
@@ -51,17 +42,13 @@ pub struct Backend {
 }
 
 impl Backend {
-    /// Это одно из соединений pgtop'а? Проверяется через `application_name`,
-    /// который мы выставляем в `db::connect`. Используется для:
-    /// - визуальной серой подсветки таких строк в Activity-табе;
-    /// - блокировки cancel/terminate-actions на самих себя.
+    /// True if this row is one of pgtop's own connections, identified by
+    /// `application_name = 'pgtop'`.
     pub fn is_self(&self) -> bool {
         self.application_name.as_deref() == Some("pgtop")
     }
 }
 
-/// `pid <> pg_backend_pid()` отбрасывает нашу собственную сессию,
-/// чтобы pgtop не показывал сам себя в списке.
 const ACTIVITY_QUERY: &str = "
 SELECT
     pid,
@@ -85,15 +72,8 @@ WHERE pid <> pg_backend_pid()
 ORDER BY pid
 ";
 
-/// Подключается к Postgres по DSN; драйвер соединения детачится в фоновую таску.
-/// Сразу же помечает соединение `application_name = 'pgtop'` — для self-detection
-/// в Activity-табе и для DBA-видимости («это наш monitor»).
-///
-/// Rust-специфика: `tokio_postgres::connect` возвращает `(Client, Connection)`.
-/// `Connection` — самостоятельный Future, который гоняет I/O TCP-сокета;
-/// если её не poll'ить параллельно, любой запрос через `Client` встанет навсегда.
-/// `move` в замыкании передаёт `connection` в spawn'енную таску по value;
-/// bounds `tokio::spawn` (`Future + Send + 'static`) у `Connection` выполняются.
+/// Connect to Postgres, spawn the connection driver, and tag the session
+/// with `application_name = 'pgtop'`.
 pub async fn connect(dsn: &str) -> Result<Client, DbError> {
     let (client, connection) = tokio_postgres::connect(dsn, NoTls).await?;
 
@@ -103,24 +83,16 @@ pub async fn connect(dsn: &str) -> Result<Client, DbError> {
         }
     });
 
-    // `application_name` видно в pg_stat_activity. Все наши соединения
-    // (5+ collector'ов + executor) получают одну и ту же метку — Backend
-    // умеет детектировать себя через `application_name == 'pgtop'`.
-    // Игнорируем ошибку: даже если SET не пройдёт, остальное должно работать
-    // — просто не сможем фильтровать self-rows.
     let _ = client.execute("SET application_name = 'pgtop'", &[]).await;
 
     Ok(client)
 }
 
-/// Phase 8 Block C: подключиться, бесконечно ретрая с exponential backoff.
+/// Connect with exponential backoff (500ms → 30s cap). `on_attempt` is
+/// invoked with each 1-based attempt number before connecting.
 ///
-/// Стартовая задержка 500ms, удваивается до cap'а в 30s. `on_attempt`
-/// вызывается ПЕРЕД каждой попыткой с её номером (1-based) — позволяет
-/// активити-коллектору публиковать `ConnectionStatus::Connecting { attempt }`.
-///
-/// Возвращает `None` если cancel-токен сработал в процессе ожидания —
-/// означает graceful shutdown, вызывающий должен `return`.
+/// Returns `None` when the cancellation token fires — the caller should
+/// `return` for graceful shutdown.
 pub async fn connect_with_backoff(
     dsn: &str,
     cancel: &CancellationToken,
@@ -155,21 +127,14 @@ pub async fn connect_with_backoff(
     }
 }
 
-/// Снимает срез `pg_stat_activity` и собирает его в `Vec<Backend>`.
-///
-/// Принимает `&Client`: внутри `Client` — mpsc-канал до драйвера, так что клиент
-/// дешёвый в шеринге (он ещё и `Clone`) и не требует `Arc<Mutex<>>` для
-/// конкурентных запросов из разных tokio-задач.
+/// Snapshot `pg_stat_activity` into a `Vec<Backend>`.
 pub async fn fetch_backends(client: &Client) -> Result<Vec<Backend>, DbError> {
     let rows = client.query(ACTIVITY_QUERY, &[]).await?;
     Ok(rows.into_iter().map(row_to_backend).collect())
 }
 
-/// Запись в таблице блокировок (`pg_locks`).
-///
-/// `object` — это resolved-имя `schema.table` для `locktype = 'relation'`,
-/// для остальных типов локов NULL (transactionid/virtualxid/advisory имеют
-/// свои идентификаторы; для walking skeleton не показываем).
+/// One row from `pg_locks`. `object` resolves to `schema.table` for
+/// `locktype = 'relation'` and is `None` otherwise.
 #[derive(Debug, Clone)]
 pub struct Lock {
     pub pid: i32,
@@ -179,12 +144,6 @@ pub struct Lock {
     pub object: Option<String>,
 }
 
-/// SQL для locks view.
-///
-/// LEFT JOIN на `pg_class`/`pg_namespace` для resolve oid → schema.table.
-/// `WHERE l.pid IS NOT NULL` отбрасывает prepared transactions (там pid NULL).
-/// `ORDER BY granted, pid` — waiting (granted=false) поднимаются наверх,
-/// что критично для мониторинга contention'а.
 const LOCKS_QUERY: &str = "
 SELECT
     l.pid,
@@ -204,7 +163,7 @@ WHERE l.pid IS NOT NULL
 ORDER BY l.granted, l.pid
 ";
 
-/// Снимает срез `pg_locks` (с LEFT JOIN-resolve relation oid в имя).
+/// Snapshot `pg_locks`, resolving relation OIDs to `schema.table` names.
 pub async fn fetch_locks(client: &Client) -> Result<Vec<Lock>, DbError> {
     let rows = client.query(LOCKS_QUERY, &[]).await?;
     Ok(rows.into_iter().map(row_to_lock).collect())
@@ -220,27 +179,22 @@ fn row_to_lock(row: Row) -> Lock {
     }
 }
 
-/// Запись из `pg_stat_statements` — нормализованная статистика по уникальному
-/// тексту запроса (с подставленными `$1`, `$2`).
+/// One row from `pg_stat_statements` — normalised statistics per unique
+/// query text.
 #[derive(Debug, Clone)]
 pub struct TopQuery {
     pub query: String,
     pub calls: i64,
-    /// Cumulative time across all `calls`. Postgres хранит в миллисекундах.
+    /// Cumulative time across all calls, milliseconds.
     pub total_exec_time_ms: f64,
-    /// Среднее время одного вызова в миллисекундах.
+    /// Mean time per call, milliseconds.
     pub mean_exec_time_ms: f64,
     /// Total rows returned/affected across all calls.
     pub rows: i64,
 }
 
-/// Snapshot Top Queries таба с тремя состояниями: Loading (до первого poll'а),
-/// ExtensionMissing (расширение `pg_stat_statements` не установлено), Available.
-///
-/// Three-state enum вместо `Option<Vec<...>>` — потому что None в Option
-/// не даёт различить «ещё не загрузили» и «недоступно». Первое — временное
-/// и UI должен показать «загрузка»; второе — постоянное (до перезагрузки)
-/// и UI должен показать инструкцию по установке.
+/// Top Queries snapshot with three states: not yet polled, extension
+/// missing, or available data.
 #[derive(Debug, Clone)]
 pub enum TopQueriesSnapshot {
     Loading,
@@ -248,9 +202,6 @@ pub enum TopQueriesSnapshot {
     Available(Vec<TopQuery>),
 }
 
-/// Имена колонок `pg_stat_statements` поменялись в PG13: было `total_time` /
-/// `mean_time`, стало `total_exec_time` / `mean_exec_time` (плюс `*_plan_time`).
-/// Мы используем PG16, ходим по новым именам.
 const TOP_QUERIES_QUERY: &str = "
 SELECT
     query,
@@ -263,10 +214,7 @@ ORDER BY total_exec_time DESC
 LIMIT 50
 ";
 
-/// Сначала проверяем наличие extension через `pg_extension`, потом запрашиваем
-/// сами статистики. Без EXISTS-проверки запрос к `pg_stat_statements`
-/// упал бы с «relation does not exist», и парсить ошибку для отличия
-/// «нет extension» от «другая SQL-ошибка» ненадёжно.
+/// Check that `pg_stat_statements` is installed and return the top queries.
 pub async fn fetch_top_queries(client: &Client) -> Result<TopQueriesSnapshot, DbError> {
     let row = client
         .query_one(
@@ -296,11 +244,7 @@ fn row_to_top_query(row: Row) -> TopQuery {
     }
 }
 
-/// Запись из `pg_stat_replication` — клиент streaming-репликации.
-///
-/// `#[allow(dead_code)]`: SQL читает все полезные поля (`client_addr`,
-/// `sent_lsn`), но текущий view показывает не всё. Появятся в Phase 4-style
-/// detail view, если/когда будем делать.
+/// One row from `pg_stat_replication` — a streaming replication client.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Replica {
@@ -309,17 +253,12 @@ pub struct Replica {
     pub client_addr: Option<String>,
     pub state: Option<String>,
     pub sync_state: Option<String>,
-    /// Retreplay lag в секундах (`EXTRACT(EPOCH FROM replay_lag)`).
-    /// `None` если реплика только подключилась (lag-fields ещё NULL).
+    /// Replay lag in seconds. `None` for newly-connected replicas.
     pub replay_lag_secs: Option<f64>,
     pub sent_lsn: Option<String>,
     pub replay_lsn: Option<String>,
 }
 
-/// `pg_lsn::text` даёт строковое представление LSN ("0/16B7E50") — без
-/// зависимости от tokio-postgres-фичи под этот тип.
-/// `EXTRACT(EPOCH FROM interval)::float8` превращает интервал в секунды
-/// как float — компактно для отображения.
 const REPLICATION_QUERY: &str = "
 SELECT
     pid,
@@ -352,9 +291,8 @@ fn row_to_replica(row: Row) -> Replica {
     }
 }
 
-/// Сводные метрики для шапки: TPS, активные соединения, cache hit ratio.
-/// `tps` вычисляется в collector'е как дельта между двумя snapshot'ами, поэтому
-/// первый снапшот отдаст 0.0 (нет previous для diff'а).
+/// Header summary metrics: TPS, active connections, cache hit ratio.
+/// `tps` is computed by the collector as a delta between snapshots.
 #[derive(Debug, Clone, Copy)]
 pub struct Stats {
     pub tps: f64,
@@ -362,25 +300,15 @@ pub struct Stats {
     pub cache_hit_pct: f64,
 }
 
-/// Сырые значения для подсчёта `Stats` — до diff'а на стороне collector'а.
+/// Raw values used by the collector to derive `Stats`.
 #[derive(Debug, Clone, Copy)]
 pub struct RawStats {
-    /// Кумулятивное число транзакций (commit + rollback) по всем БД.
+    /// Cumulative `xact_commit + xact_rollback` across all databases.
     pub xacts: i64,
     pub active_connections: u32,
     pub cache_hit_pct: f64,
 }
 
-/// Один query со тремя scalar-subqueries — экономит round-trip'ы.
-///
-/// Касты `::int8`/`::int4`/`::float8` обязательны: в Postgres `SUM(bigint)`
-/// возвращает `numeric` (для overflow-safety), `COUNT(*)` — `bigint`,
-/// и `100.0` — `numeric`. tokio-postgres без отдельного крейта (`rust-decimal`)
-/// не умеет десериализовать numeric, поэтому форсим целевые типы в SQL.
-///
-/// `cache_hit_pct`: при отсутствии чтений (denom = 0) возвращаем 100% —
-/// «всё в кэше», иначе DIVIDE BY ZERO. CASE-ветки кастятся в float8
-/// независимо, чтобы итоговый column-тип был стабильно float8.
 const STATS_QUERY: &str = "
 SELECT
     (SELECT COALESCE(SUM(xact_commit + xact_rollback), 0)::int8
@@ -406,7 +334,6 @@ pub async fn fetch_raw_stats(client: &Client) -> Result<RawStats, DbError> {
     })
 }
 
-/// Маппит одну строку из `ACTIVITY_QUERY` в `Backend`.
 fn row_to_backend(row: Row) -> Backend {
     Backend {
         pid: row.get("pid"),

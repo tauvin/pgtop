@@ -1,8 +1,4 @@
-//! Confirm-popup для destructive-actions (Phase 6).
-//!
-//! Маленький центрированный popup с подтверждением. `Clear` widget «прокалывает
-//! дыру» в фоне — виден контекст (table сзади), но содержимое popup'а не
-//! просвечивается через ASCII фоновой таблицы.
+//! Confirmation popups for destructive actions (cancel and terminate).
 
 use ratatui::{
     Frame,
@@ -11,11 +7,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph, Wrap},
 };
-// Stylize-методы (`.bold()`, `.red()`) сидят прямо в `style::Stylize`,
-// импортированном выше. `Span::style()` — обычный builder, не trait-метод.
 
-/// Popup для cancel-confirmation. Размер достаточен для 6-7 строк текста
-/// и заголовка. Жёлтая рамка — визуальный сигнал «destructive action».
+/// Render the cancel confirmation popup.
 pub fn render_confirm_cancel(frame: &mut Frame, area: Rect, pid: i32) {
     let popup = centered_rect(50, 30, area);
     frame.render_widget(Clear, popup);
@@ -52,9 +45,8 @@ pub fn render_confirm_cancel(frame: &mut Frame, area: Rect, pid: i32) {
     frame.render_widget(para, inner);
 }
 
-/// Confirm для destructive `pg_terminate_backend`. Красная рамка вместо жёлтой
-/// (как у Cancel) — визуальный maximum-warning. Type-yes-to-confirm не даёт
-/// случайно нажать Enter: команда уйдёт только когда текст == `"yes"`.
+/// Render the terminate confirmation popup. Requires the user to type
+/// `"yes"` before Enter sends the command.
 pub fn render_confirm_terminate(frame: &mut Frame, area: Rect, pid: i32, typed: &str) {
     let popup = centered_rect(54, 40, area);
     frame.render_widget(Clear, popup);
@@ -65,8 +57,6 @@ pub fn render_confirm_terminate(frame: &mut Frame, area: Rect, pid: i32, typed: 
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    // Когда пользователь правильно набрал "yes" — prompt становится зелёным,
-    // показывая что Enter теперь сработает. До этого — жёлтый «не готово».
     let valid = typed == "yes";
     let prompt_color = if valid { Color::Green } else { Color::Yellow };
 
@@ -106,7 +96,6 @@ pub fn render_confirm_terminate(frame: &mut Frame, area: Rect, pid: i32, typed: 
     frame.render_widget(para, inner);
 }
 
-/// Тот же подход что в widgets::detail::centered_rect — двойной Layout-split.
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let [_, mid_v, _] = Layout::vertical([
         Constraint::Percentage((100 - percent_y) / 2),

@@ -1,6 +1,4 @@
-//! Сборщик `pg_stat_replication`: 5-секундный интервал.
-//!
-//! Phase 8 Block C: silent reconnect.
+//! `pg_stat_replication` collector. Reconnects silently on connection loss.
 
 use std::time::Duration;
 

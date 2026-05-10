@@ -1,17 +1,26 @@
 //! Low-level Postgres access: connection setup and `pg_stat_*` queries.
 //! Higher layers (collectors, UI) consume the typed structs defined here.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use rustls::ClientConfig;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::ring;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme};
 use thiserror::Error;
-use tokio_postgres::{Client, NoTls, Row};
+use tokio_postgres::{Client, Config, Row};
+use tokio_postgres_rustls::MakeRustlsConnect;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("postgres error: {0}")]
     Postgres(#[from] tokio_postgres::Error),
+    #[error("invalid dsn: {0}")]
+    Dsn(String),
 }
 
 /// Subset of `pg_stat_activity` columns consumed by pgtop. Nullable columns
@@ -72,10 +81,22 @@ WHERE pid <> pg_backend_pid()
 ORDER BY pid
 ";
 
-/// Connect to Postgres, spawn the connection driver, and tag the session
-/// with `application_name = 'pgtop'`.
+/// Connect to Postgres with TLS support driven by the DSN's `sslmode`,
+/// spawn the connection driver, and tag the session with
+/// `application_name = 'pgtop'`.
+///
+/// Honours all five libpq sslmode values: `disable`, `prefer` (default),
+/// `require`, `verify-ca`, `verify-full`. The verify-* modes are
+/// pre-processed: tokio-postgres only knows the first three, so we
+/// translate verify-{ca,full} to require and turn on cert verification
+/// against the Mozilla root store (`webpki-roots`).
 pub async fn connect(dsn: &str) -> Result<Client, DbError> {
-    let (client, connection) = tokio_postgres::connect(dsn, NoTls).await?;
+    let (cleaned, verify_certs) = rewrite_verify_sslmode(dsn);
+    let config: Config = cleaned
+        .parse()
+        .map_err(|e: tokio_postgres::Error| DbError::Dsn(e.to_string()))?;
+    let connector = make_connector(verify_certs);
+    let (client, connection) = config.connect(connector).await?;
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -86,6 +107,95 @@ pub async fn connect(dsn: &str) -> Result<Client, DbError> {
     let _ = client.execute("SET application_name = 'pgtop'", &[]).await;
 
     Ok(client)
+}
+
+/// tokio-postgres 0.7 rejects `sslmode=verify-{ca,full}` at parse time. We
+/// translate them to `sslmode=require` and let the caller request cert
+/// verification through the connector instead.
+fn rewrite_verify_sslmode(dsn: &str) -> (String, bool) {
+    if dsn.contains("sslmode=verify-full") {
+        (dsn.replace("sslmode=verify-full", "sslmode=require"), true)
+    } else if dsn.contains("sslmode=verify-ca") {
+        (dsn.replace("sslmode=verify-ca", "sslmode=require"), true)
+    } else {
+        (dsn.to_string(), false)
+    }
+}
+
+fn make_connector(verify_certs: bool) -> MakeRustlsConnect {
+    let config = if verify_certs {
+        verifying_tls_config()
+    } else {
+        no_verify_tls_config()
+    };
+    MakeRustlsConnect::new(config)
+}
+
+fn verifying_tls_config() -> ClientConfig {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("rustls supports default protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
+
+fn no_verify_tls_config() -> ClientConfig {
+    ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("rustls supports default protocol versions")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoVerify))
+        .with_no_client_auth()
+}
+
+#[derive(Debug)]
+struct NoVerify;
+
+impl ServerCertVerifier for NoVerify {
+    fn verify_server_cert(
+        &self,
+        _: &CertificateDer<'_>,
+        _: &[CertificateDer<'_>],
+        _: &ServerName<'_>,
+        _: &[u8],
+        _: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &CertificateDer<'_>,
+        _: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _: &[u8],
+        _: &CertificateDer<'_>,
+        _: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ED25519,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+        ]
+    }
 }
 
 /// Connect with exponential backoff (500ms → 30s cap). `on_attempt` is
@@ -352,5 +462,40 @@ fn row_to_backend(row: Row) -> Backend {
         backend_xmin: row.get("backend_xmin"),
         query: row.get("query"),
         backend_type: row.get("backend_type"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_verify_sslmode_passes_through_other_modes() {
+        assert_eq!(
+            rewrite_verify_sslmode("postgres://h/d?sslmode=disable"),
+            ("postgres://h/d?sslmode=disable".to_string(), false)
+        );
+        assert_eq!(
+            rewrite_verify_sslmode("postgres://h/d?sslmode=require"),
+            ("postgres://h/d?sslmode=require".to_string(), false)
+        );
+        assert_eq!(
+            rewrite_verify_sslmode("host=h dbname=d"),
+            ("host=h dbname=d".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn rewrite_verify_sslmode_translates_verify_full() {
+        let (cleaned, verify) = rewrite_verify_sslmode("postgres://h/d?sslmode=verify-full");
+        assert_eq!(cleaned, "postgres://h/d?sslmode=require");
+        assert!(verify);
+    }
+
+    #[test]
+    fn rewrite_verify_sslmode_translates_verify_ca() {
+        let (cleaned, verify) = rewrite_verify_sslmode("host=h sslmode=verify-ca dbname=d");
+        assert_eq!(cleaned, "host=h sslmode=require dbname=d");
+        assert!(verify);
     }
 }

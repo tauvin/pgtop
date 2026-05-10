@@ -23,6 +23,9 @@ exclude = [
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+tokio-postgres-rustls = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 chrono = "0.4"
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }

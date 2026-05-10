@@ -124,6 +124,26 @@ Layered priority (lowest → highest): hardcoded defaults → profile
 
 A complete example lives in [`config.example.toml`](config.example.toml).
 
+## TLS
+
+Managed Postgres providers (RDS, Cloud SQL, Heroku, Supabase, …) require
+TLS. pgtop honours all five libpq `sslmode` values via the DSN:
+
+| `sslmode`     | Behaviour                                                                                       |
+| ------------- | ----------------------------------------------------------------------------------------------- |
+| `disable`     | No TLS.                                                                                         |
+| `prefer`      | Try TLS; fall back to plain. **Default.**                                                       |
+| `require`     | TLS forced. No certificate verification.                                                        |
+| `verify-ca`   | TLS forced. Certificate validated against the bundled Mozilla root store (`webpki-roots`).      |
+| `verify-full` | Same as `verify-ca`. (Hostname check is not yet differentiated.)                                |
+
+```sh
+pgtop --dsn 'postgres://user:pass@my-rds.amazonaws.com/db?sslmode=verify-full'
+```
+
+Custom CAs (corporate / self-signed): not supported yet — use `sslmode=require`
+to skip verification, or open an issue describing your use case.
+
 ## Required permissions
 
 Most tabs work on a vanilla read-only role:

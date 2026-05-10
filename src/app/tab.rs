@@ -1,31 +1,35 @@
 //! Tab and sort-key enums. Stateless metadata: labels, indices, stable
-//! string ids for persisted state.
+//! string ids for persisted state. `strum` derives generate `iter()` (used
+//! to map between `usize` index and variant) and `AsRef<str>` /
+//! `EnumString` (used for the persisted-state id).
+
+use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
 /// Active TUI tab.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+//
+// `serialize`-attributes drive both `IntoStaticStr` (used for `id()`) and
+// `EnumString::from_str()` (used for `from_id()`). Display labels are not
+// derived because `Top Queries` contains a space, which would awkwardly
+// collide with the serialize attribute; `label()` stays a manual match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, IntoStaticStr, EnumString)]
 pub enum Tab {
+    #[strum(serialize = "activity")]
     Activity,
+    #[strum(serialize = "locks")]
     Locks,
+    #[strum(serialize = "top_queries")]
     TopQueries,
+    #[strum(serialize = "replication")]
     Replication,
+    #[strum(serialize = "databases")]
     Databases,
+    #[strum(serialize = "tables")]
     Tables,
+    #[strum(serialize = "waits")]
     Waits,
 }
 
 impl Tab {
-    pub const fn all() -> &'static [Tab] {
-        &[
-            Tab::Activity,
-            Tab::Locks,
-            Tab::TopQueries,
-            Tab::Replication,
-            Tab::Databases,
-            Tab::Tables,
-            Tab::Waits,
-        ]
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Activity => "Activity",
@@ -39,92 +43,56 @@ impl Tab {
     }
 
     pub fn index(self) -> usize {
-        match self {
-            Self::Activity => 0,
-            Self::Locks => 1,
-            Self::TopQueries => 2,
-            Self::Replication => 3,
-            Self::Databases => 4,
-            Self::Tables => 5,
-            Self::Waits => 6,
-        }
+        Self::iter().position(|t| t == self).unwrap_or(0)
     }
 
     pub fn from_index(i: usize) -> Option<Tab> {
-        Self::all().get(i).copied()
+        Self::iter().nth(i)
     }
 
-    /// Stable string id used for persisted UI state — matches the label
-    /// in lowercase + no spaces.
+    pub fn count() -> usize {
+        Self::iter().count()
+    }
+
+    /// Stable string id used for persisted UI state.
     pub fn id(self) -> &'static str {
-        match self {
-            Self::Activity => "activity",
-            Self::Locks => "locks",
-            Self::TopQueries => "top_queries",
-            Self::Replication => "replication",
-            Self::Databases => "databases",
-            Self::Tables => "tables",
-            Self::Waits => "waits",
-        }
+        self.into()
     }
 
     pub fn from_id(s: &str) -> Option<Self> {
-        match s {
-            "activity" => Some(Self::Activity),
-            "locks" => Some(Self::Locks),
-            "top_queries" => Some(Self::TopQueries),
-            "replication" => Some(Self::Replication),
-            "databases" => Some(Self::Databases),
-            "tables" => Some(Self::Tables),
-            "waits" => Some(Self::Waits),
-            _ => None,
-        }
+        s.parse().ok()
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, IntoStaticStr, EnumString)]
 pub enum SortBy {
+    #[strum(serialize = "pid")]
     Pid,
+    #[strum(serialize = "user")]
     User,
+    #[strum(serialize = "state")]
     State,
+    #[strum(serialize = "wait")]
     Wait,
+    #[strum(serialize = "duration")]
     Duration,
+    #[strum(serialize = "query")]
     Query,
 }
 
 impl SortBy {
     pub fn next(self) -> Self {
-        match self {
-            Self::Pid => Self::User,
-            Self::User => Self::State,
-            Self::State => Self::Wait,
-            Self::Wait => Self::Duration,
-            Self::Duration => Self::Query,
-            Self::Query => Self::Pid,
-        }
+        let mut it = Self::iter().cycle().skip_while(|&v| v != self);
+        it.next();
+        it.next().expect("non-empty cycle")
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            Self::Pid => "pid",
-            Self::User => "user",
-            Self::State => "state",
-            Self::Wait => "wait",
-            Self::Duration => "duration",
-            Self::Query => "query",
-        }
+        self.into()
     }
 
     pub fn from_label(s: &str) -> Option<Self> {
-        match s {
-            "pid" => Some(Self::Pid),
-            "user" => Some(Self::User),
-            "state" => Some(Self::State),
-            "wait" => Some(Self::Wait),
-            "duration" => Some(Self::Duration),
-            "query" => Some(Self::Query),
-            _ => None,
-        }
+        s.parse().ok()
     }
 }
 
@@ -195,5 +163,26 @@ mod tests {
     fn sort_direction_flip_round_trips() {
         assert_eq!(SortDirection::Asc.flip(), SortDirection::Desc);
         assert_eq!(SortDirection::Asc.flip().flip(), SortDirection::Asc);
+    }
+
+    #[test]
+    fn tab_id_round_trips() {
+        for t in Tab::iter() {
+            assert_eq!(Tab::from_id(t.id()), Some(t));
+        }
+    }
+
+    #[test]
+    fn tab_index_round_trips() {
+        for t in Tab::iter() {
+            assert_eq!(Tab::from_index(t.index()), Some(t));
+        }
+    }
+
+    #[test]
+    fn sort_by_label_round_trips() {
+        for s in SortBy::iter() {
+            assert_eq!(SortBy::from_label(s.label()), Some(s));
+        }
     }
 }

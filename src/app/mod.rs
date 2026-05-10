@@ -318,7 +318,7 @@ impl App {
     }
 
     pub fn next_tab(&mut self) {
-        let next = (self.current_tab.index() + 1) % Tab::all().len();
+        let next = (self.current_tab.index() + 1) % Tab::count();
         self.current_tab = Tab::from_index(next).unwrap();
     }
 }

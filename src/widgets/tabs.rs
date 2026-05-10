@@ -8,10 +8,12 @@ use ratatui::{
     widgets::Tabs,
 };
 
+use strum::IntoEnumIterator;
+
 use crate::app::Tab;
 
 pub fn render_tab_bar(frame: &mut Frame, area: Rect, current: Tab) {
-    let titles: Vec<Line> = Tab::all().iter().map(|t| Line::from(t.label())).collect();
+    let titles: Vec<Line> = Tab::iter().map(|t| Line::from(t.label())).collect();
     let tabs = Tabs::new(titles)
         .select(current.index())
         .style(Style::new())

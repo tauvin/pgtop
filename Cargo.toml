@@ -3,6 +3,22 @@ name = "pgtop"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
+authors = ["Andrii Karbanovich <andrey.karbanovich@icloud.com>"]
+description = "TUI activity monitor for PostgreSQL — pg_stat_activity, locks, top queries and replication in one terminal pane"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tauvin/pgtop"
+homepage = "https://github.com/tauvin/pgtop"
+keywords = ["postgres", "postgresql", "tui", "monitor", "ratatui"]
+categories = ["command-line-utilities", "database"]
+exclude = [
+    "/.cargo-husky",
+    "/.claude",
+    "/.idea",
+    "/docs",
+    "/scripts",
+    "/docker-compose.yml",
+]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -32,4 +48,9 @@ regex = "1"
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 
 [profile.release]
+lto = "thin"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
 lto = "thin"

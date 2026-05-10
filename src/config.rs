@@ -224,3 +224,73 @@ impl Resolved {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_profile(name: &str, dsn: Option<&str>, read_only: bool) -> Config {
+        let mut c = Config::default();
+        c.profiles.insert(
+            name.to_string(),
+            Profile {
+                dsn: dsn.map(str::to_string),
+                read_only,
+            },
+        );
+        c
+    }
+
+    #[test]
+    fn unknown_profile_returns_error() {
+        let c = Config::default();
+        let err = Resolved::from_layers(&c, Some("prod"), None, false, false).unwrap_err();
+        assert!(err.to_string().contains("profile 'prod' not found"));
+    }
+
+    #[test]
+    fn cli_dsn_wins_over_profile() {
+        let c = config_with_profile("prod", Some("profile-dsn"), false);
+        let r = Resolved::from_layers(&c, Some("prod"), Some("cli-dsn"), false, false).unwrap();
+        assert_eq!(r.dsn, "cli-dsn");
+    }
+
+    #[test]
+    fn read_only_profile_disables_actions_even_with_allow_flag() {
+        let c = config_with_profile("prod", Some("d"), true);
+        let r = Resolved::from_layers(&c, Some("prod"), None, true, false).unwrap();
+        assert!(r.read_only);
+        assert!(!r.actions_allowed);
+    }
+
+    #[test]
+    fn cli_read_only_disables_actions() {
+        let c = config_with_profile("x", Some("d"), false);
+        let r = Resolved::from_layers(&c, Some("x"), None, true, true).unwrap();
+        assert!(r.read_only);
+        assert!(!r.actions_allowed);
+    }
+
+    #[test]
+    fn actions_allowed_only_when_cli_flag_and_not_read_only() {
+        let c = config_with_profile("x", Some("d"), false);
+        let r = Resolved::from_layers(&c, Some("x"), None, true, false).unwrap();
+        assert!(!r.read_only);
+        assert!(r.actions_allowed);
+    }
+
+    #[test]
+    fn slow_query_threshold_default_is_30s() {
+        let c = config_with_profile("x", Some("d"), false);
+        let r = Resolved::from_layers(&c, Some("x"), None, false, false).unwrap();
+        assert_eq!(r.slow_query_threshold, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn slow_query_threshold_honors_config() {
+        let mut c = config_with_profile("x", Some("d"), false);
+        c.slow_query_threshold_secs = Some(120);
+        let r = Resolved::from_layers(&c, Some("x"), None, false, false).unwrap();
+        assert_eq!(r.slow_query_threshold, Duration::from_secs(120));
+    }
+}

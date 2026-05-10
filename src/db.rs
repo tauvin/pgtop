@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use rustls::ClientConfig;
+use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme};
+use rustls::{CertificateError, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use thiserror::Error;
 use tokio_postgres::{Client, Config, Row};
 use tokio_postgres_rustls::MakeRustlsConnect;
@@ -88,14 +89,14 @@ ORDER BY pid
 /// Honours all five libpq sslmode values: `disable`, `prefer` (default),
 /// `require`, `verify-ca`, `verify-full`. The verify-* modes are
 /// pre-processed: tokio-postgres only knows the first three, so we
-/// translate verify-{ca,full} to require and turn on cert verification
-/// against the Mozilla root store (`webpki-roots`).
+/// translate verify-{ca,full} to `require` and pick the correct cert
+/// verifier (chain-only vs chain+hostname) at the connector level.
 pub async fn connect(dsn: &str) -> Result<Client, DbError> {
-    let (cleaned, verify_certs) = rewrite_verify_sslmode(dsn);
+    let (cleaned, verify_mode) = rewrite_verify_sslmode(dsn);
     let config: Config = cleaned
         .parse()
         .map_err(|e: tokio_postgres::Error| DbError::Dsn(e.to_string()))?;
-    let connector = make_connector(verify_certs);
+    let connector = make_connector(verify_mode);
     let (client, connection) = config.connect(connector).await?;
 
     tokio::spawn(async move {
@@ -109,35 +110,75 @@ pub async fn connect(dsn: &str) -> Result<Client, DbError> {
     Ok(client)
 }
 
+/// Cert-verification level requested by the user. Mirrors libpq's three
+/// distinct security levels for `sslmode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyMode {
+    /// `disable` / `prefer` / `require` — no chain or hostname check.
+    None,
+    /// `verify-ca` — chain validates against trusted roots; hostname is
+    /// not required to match. Useful for self-signed setups where the CA
+    /// is trusted but certs have a different CN than the host you connect
+    /// to.
+    ChainOnly,
+    /// `verify-full` — chain plus hostname match against the DSN host.
+    Full,
+}
+
 /// tokio-postgres 0.7 rejects `sslmode=verify-{ca,full}` at parse time. We
-/// translate them to `sslmode=require` and let the caller request cert
-/// verification through the connector instead.
-fn rewrite_verify_sslmode(dsn: &str) -> (String, bool) {
+/// translate them to `sslmode=require` and let the caller pick the
+/// matching verifier through the connector.
+fn rewrite_verify_sslmode(dsn: &str) -> (String, VerifyMode) {
     if dsn.contains("sslmode=verify-full") {
-        (dsn.replace("sslmode=verify-full", "sslmode=require"), true)
+        (
+            dsn.replace("sslmode=verify-full", "sslmode=require"),
+            VerifyMode::Full,
+        )
     } else if dsn.contains("sslmode=verify-ca") {
-        (dsn.replace("sslmode=verify-ca", "sslmode=require"), true)
+        (
+            dsn.replace("sslmode=verify-ca", "sslmode=require"),
+            VerifyMode::ChainOnly,
+        )
     } else {
-        (dsn.to_string(), false)
+        (dsn.to_string(), VerifyMode::None)
     }
 }
 
-fn make_connector(verify_certs: bool) -> MakeRustlsConnect {
-    let config = if verify_certs {
-        verifying_tls_config()
-    } else {
-        no_verify_tls_config()
+fn make_connector(mode: VerifyMode) -> MakeRustlsConnect {
+    let config = match mode {
+        VerifyMode::None => no_verify_tls_config(),
+        VerifyMode::ChainOnly => chain_only_tls_config(),
+        VerifyMode::Full => verifying_tls_config(),
     };
     MakeRustlsConnect::new(config)
 }
 
-fn verifying_tls_config() -> ClientConfig {
+fn webpki_roots_store() -> Arc<RootCertStore> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    Arc::new(roots)
+}
+
+fn verifying_tls_config() -> ClientConfig {
     ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
         .with_safe_default_protocol_versions()
         .expect("rustls supports default protocol versions")
-        .with_root_certificates(roots)
+        .with_root_certificates((*webpki_roots_store()).clone())
+        .with_no_client_auth()
+}
+
+fn chain_only_tls_config() -> ClientConfig {
+    let inner = WebPkiServerVerifier::builder_with_provider(
+        webpki_roots_store(),
+        Arc::new(ring::default_provider()),
+    )
+    .build()
+    .expect("webpki verifier builds with bundled roots");
+    ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("rustls supports default protocol versions")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(ChainOnlyVerifier { inner }))
         .with_no_client_auth()
 }
 
@@ -148,6 +189,61 @@ fn no_verify_tls_config() -> ClientConfig {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoVerify))
         .with_no_client_auth()
+}
+
+/// `verify-ca` semantics: delegate to the standard webpki verifier for
+/// chain validation, then ignore hostname-mismatch errors. Signature
+/// verification still runs through the inner verifier.
+#[derive(Debug)]
+struct ChainOnlyVerifier {
+    inner: Arc<WebPkiServerVerifier>,
+}
+
+impl ServerCertVerifier for ChainOnlyVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        match self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        ) {
+            Err(rustls::Error::InvalidCertificate(CertificateError::NotValidForName))
+            | Err(rustls::Error::InvalidCertificate(CertificateError::NotValidForNameContext {
+                ..
+            })) => Ok(ServerCertVerified::assertion()),
+            other => other,
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
 }
 
 #[derive(Debug)]
@@ -596,29 +692,45 @@ mod tests {
     fn rewrite_verify_sslmode_passes_through_other_modes() {
         assert_eq!(
             rewrite_verify_sslmode("postgres://h/d?sslmode=disable"),
-            ("postgres://h/d?sslmode=disable".to_string(), false)
+            (
+                "postgres://h/d?sslmode=disable".to_string(),
+                VerifyMode::None
+            )
         );
         assert_eq!(
             rewrite_verify_sslmode("postgres://h/d?sslmode=require"),
-            ("postgres://h/d?sslmode=require".to_string(), false)
+            (
+                "postgres://h/d?sslmode=require".to_string(),
+                VerifyMode::None
+            )
         );
         assert_eq!(
             rewrite_verify_sslmode("host=h dbname=d"),
-            ("host=h dbname=d".to_string(), false)
+            ("host=h dbname=d".to_string(), VerifyMode::None)
         );
     }
 
     #[test]
     fn rewrite_verify_sslmode_translates_verify_full() {
-        let (cleaned, verify) = rewrite_verify_sslmode("postgres://h/d?sslmode=verify-full");
+        let (cleaned, mode) = rewrite_verify_sslmode("postgres://h/d?sslmode=verify-full");
         assert_eq!(cleaned, "postgres://h/d?sslmode=require");
-        assert!(verify);
+        assert_eq!(mode, VerifyMode::Full);
     }
 
     #[test]
     fn rewrite_verify_sslmode_translates_verify_ca() {
-        let (cleaned, verify) = rewrite_verify_sslmode("host=h sslmode=verify-ca dbname=d");
+        let (cleaned, mode) = rewrite_verify_sslmode("host=h sslmode=verify-ca dbname=d");
         assert_eq!(cleaned, "host=h sslmode=require dbname=d");
-        assert!(verify);
+        assert_eq!(mode, VerifyMode::ChainOnly);
+    }
+
+    #[test]
+    fn rewrite_verify_sslmode_picks_full_when_both_textually_present() {
+        // verify-full takes precedence over verify-ca to be on the safer side
+        // when a DSN is malformed (libpq itself rejects this case).
+        let (cleaned, mode) =
+            rewrite_verify_sslmode("postgres://h/d?sslmode=verify-full&backup=verify-ca");
+        assert!(cleaned.contains("sslmode=require"));
+        assert_eq!(mode, VerifyMode::Full);
     }
 }

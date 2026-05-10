@@ -161,8 +161,8 @@ TLS. pgtop honours all five libpq `sslmode` values via the DSN:
 | `disable`     | No TLS.                                                                                         |
 | `prefer`      | Try TLS; fall back to plain. **Default.**                                                       |
 | `require`     | TLS forced. No certificate verification.                                                        |
-| `verify-ca`   | TLS forced. Certificate validated against the bundled Mozilla root store (`webpki-roots`).      |
-| `verify-full` | Same as `verify-ca`. (Hostname check is not yet differentiated.)                                |
+| `verify-ca`   | TLS forced. Certificate chain validated against the bundled Mozilla root store; hostname is not checked. |
+| `verify-full` | Same as `verify-ca` plus hostname must match the DSN host (rustls default).                     |
 
 ```sh
 pgtop --dsn 'postgres://user:pass@my-rds.amazonaws.com/db?sslmode=verify-full'

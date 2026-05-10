@@ -90,3 +90,20 @@ fn format_lag(secs: Option<f64>) -> String {
 fn em_dash() -> String {
     "—".to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_lag_renders_em_dash_for_none() {
+        assert_eq!(format_lag(None), "—");
+    }
+
+    #[test]
+    fn format_lag_renders_one_decimal() {
+        assert_eq!(format_lag(Some(0.0)), "0.0s");
+        assert_eq!(format_lag(Some(1.234)), "1.2s");
+        assert_eq!(format_lag(Some(60.0)), "60.0s");
+    }
+}

@@ -711,3 +711,181 @@ fn key_to_request(key: KeyEvent) -> Option<InputRequest> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, TimeZone};
+
+    fn epoch() -> DateTime<Utc> {
+        Utc.timestamp_opt(0, 0).unwrap()
+    }
+
+    fn backend(pid: i32) -> Backend {
+        Backend {
+            pid,
+            datname: None,
+            usename: None,
+            application_name: None,
+            client_addr: None,
+            backend_start: None,
+            xact_start: None,
+            query_start: None,
+            state_change: None,
+            wait_event_type: None,
+            wait_event: None,
+            state: None,
+            backend_xid: None,
+            backend_xmin: None,
+            query: None,
+            backend_type: None,
+        }
+    }
+
+    // Filter
+
+    #[test]
+    fn filter_default_matches_everything() {
+        let f = Filter::default();
+        assert!(f.matches(&backend(1)));
+        let mut b = backend(2);
+        b.query = Some("SELECT 1".to_string());
+        assert!(f.matches(&b));
+    }
+
+    #[test]
+    fn filter_matches_substring_case_insensitive() {
+        let mut f = Filter::default();
+        f.input = "select".into();
+        f.rebuild_regex();
+
+        let mut b = backend(1);
+        b.query = Some("SELECT * FROM t".to_string());
+        assert!(f.matches(&b));
+
+        b.query = Some("delete from t".to_string());
+        assert!(!f.matches(&b));
+    }
+
+    #[test]
+    fn filter_drops_rows_without_query() {
+        let mut f = Filter::default();
+        f.input = "x".into();
+        f.rebuild_regex();
+        assert!(!f.matches(&backend(1)));
+    }
+
+    #[test]
+    fn filter_rebuild_handles_invalid_regex_gracefully() {
+        let mut f = Filter::default();
+        f.input = "[".into();
+        f.rebuild_regex();
+        assert!(f.regex.is_none());
+        assert!(f.matches(&backend(1)));
+    }
+
+    #[test]
+    fn filter_clear_resets_regex_and_input() {
+        let mut f = Filter::default();
+        f.input = "x".into();
+        f.rebuild_regex();
+        assert!(f.regex.is_some());
+
+        f.clear();
+        assert!(f.regex.is_none());
+        assert_eq!(f.input.value(), "");
+    }
+
+    // SortBy / SortDirection
+
+    #[test]
+    fn sort_by_cycles_through_all_columns() {
+        let mut s = SortBy::Pid;
+        let mut seen = vec![s];
+        for _ in 0..6 {
+            s = s.next();
+            seen.push(s);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                SortBy::Pid,
+                SortBy::User,
+                SortBy::State,
+                SortBy::Wait,
+                SortBy::Duration,
+                SortBy::Query,
+                SortBy::Pid,
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_direction_flip_round_trips() {
+        assert_eq!(SortDirection::Asc.flip(), SortDirection::Desc);
+        assert_eq!(SortDirection::Asc.flip().flip(), SortDirection::Asc);
+    }
+
+    // compare_backends
+
+    #[test]
+    fn compare_backends_pid_ascending() {
+        let a = backend(10);
+        let b = backend(20);
+        assert_eq!(
+            compare_backends(&a, &b, SortBy::Pid, epoch()),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compare_backends_user_alphabetical_with_nulls_last() {
+        let mut a = backend(1);
+        a.usename = Some("alice".to_string());
+        let mut b = backend(2);
+        b.usename = Some("bob".to_string());
+        assert_eq!(
+            compare_backends(&a, &b, SortBy::User, epoch()),
+            Ordering::Less
+        );
+
+        // Option<T>: None < Some(_), so a NULL usename sorts before any name.
+        let c = backend(3);
+        assert_eq!(
+            compare_backends(&c, &a, SortBy::User, epoch()),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compare_backends_duration_uses_query_start() {
+        let now = Utc.timestamp_opt(1_000_000, 0).unwrap();
+        let mut older = backend(1);
+        older.query_start = Some(now - chrono::Duration::seconds(60));
+        let mut younger = backend(2);
+        younger.query_start = Some(now - chrono::Duration::seconds(5));
+
+        // Older query → larger `now - start` → greater duration.
+        assert_eq!(
+            compare_backends(&older, &younger, SortBy::Duration, now),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn compare_backends_wait_compares_pair() {
+        let mut a = backend(1);
+        a.wait_event_type = Some("Lock".to_string());
+        a.wait_event = Some("relation".to_string());
+
+        let mut b = backend(2);
+        b.wait_event_type = Some("Lock".to_string());
+        b.wait_event = Some("transactionid".to_string());
+
+        assert_eq!(
+            compare_backends(&a, &b, SortBy::Wait, epoch()),
+            Ordering::Less
+        );
+    }
+}

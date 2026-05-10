@@ -124,3 +124,28 @@ fn format_query(q: &str) -> String {
         None => one_line,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_query_collapses_whitespace() {
+        let q = "SELECT\n  *\n  FROM   users";
+        assert_eq!(format_query(q), "SELECT * FROM users");
+    }
+
+    #[test]
+    fn format_query_truncates_to_80_chars_with_ellipsis() {
+        let q = "x".repeat(120);
+        let out = format_query(&q);
+        let chars: Vec<char> = out.chars().collect();
+        assert_eq!(chars.len(), 81);
+        assert_eq!(chars[80], '…');
+    }
+
+    #[test]
+    fn format_query_short_input_is_returned_as_is() {
+        assert_eq!(format_query("SELECT 1"), "SELECT 1");
+    }
+}

@@ -141,3 +141,94 @@ fn format_query(query: Option<&str>) -> String {
 fn em_dash() -> String {
     "—".to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn backend() -> Backend {
+        Backend {
+            pid: 0,
+            datname: None,
+            usename: None,
+            application_name: None,
+            client_addr: None,
+            backend_start: None,
+            xact_start: None,
+            query_start: None,
+            state_change: None,
+            wait_event_type: None,
+            wait_event: None,
+            state: None,
+            backend_xid: None,
+            backend_xmin: None,
+            query: None,
+            backend_type: None,
+        }
+    }
+
+    #[test]
+    fn format_wait_renders_em_dash_for_idle_backend() {
+        assert_eq!(format_wait(&backend()), "—");
+    }
+
+    #[test]
+    fn format_wait_combines_type_and_event() {
+        let mut b = backend();
+        b.wait_event_type = Some("Lock".to_string());
+        b.wait_event = Some("relation".to_string());
+        assert_eq!(format_wait(&b), "Lock: relation");
+    }
+
+    #[test]
+    fn format_wait_falls_back_to_either_field() {
+        let mut b = backend();
+        b.wait_event_type = Some("Client".to_string());
+        assert_eq!(format_wait(&b), "Client");
+
+        let mut b = backend();
+        b.wait_event = Some("ClientRead".to_string());
+        assert_eq!(format_wait(&b), "ClientRead");
+    }
+
+    #[test]
+    fn format_duration_renders_em_dash_for_no_query() {
+        let now = Utc.timestamp_opt(1_000, 0).unwrap();
+        assert_eq!(format_duration(None, now), "—");
+    }
+
+    #[test]
+    fn format_duration_pads_minutes_and_seconds() {
+        let now = Utc.timestamp_opt(3725, 0).unwrap();
+        let start = Utc.timestamp_opt(0, 0).unwrap();
+        assert_eq!(format_duration(Some(start), now), "1:02:05");
+    }
+
+    #[test]
+    fn format_duration_clamps_negative_clock_skew_to_zero() {
+        let now = Utc.timestamp_opt(0, 0).unwrap();
+        let start = Utc.timestamp_opt(60, 0).unwrap();
+        assert_eq!(format_duration(Some(start), now), "0:00:00");
+    }
+
+    #[test]
+    fn format_query_collapses_whitespace_and_joins_lines() {
+        let q = "SELECT  *\n  FROM   users\n  WHERE id = 1";
+        assert_eq!(format_query(Some(q)), "SELECT * FROM users WHERE id = 1");
+    }
+
+    #[test]
+    fn format_query_truncates_to_60_chars_with_ellipsis() {
+        let q = "x".repeat(100);
+        let out = format_query(Some(&q));
+        let chars: Vec<char> = out.chars().collect();
+        assert_eq!(chars.len(), 61);
+        assert_eq!(chars[60], '…');
+    }
+
+    #[test]
+    fn format_query_handles_none() {
+        assert_eq!(format_query(None), "—");
+    }
+}

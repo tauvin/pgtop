@@ -25,7 +25,7 @@ pub fn render_filter_line(frame: &mut Frame, area: Rect, app: &App) {
         jump_input_line(input)
     } else if conn.filter.regex.is_some() {
         filter_status_line(conn)
-    } else if let Some(result) = &app.last_action_result {
+    } else if let Some(result) = &conn.last_action_result {
         action_result_line(result, app.theme)
     } else {
         return;

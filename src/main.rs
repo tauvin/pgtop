@@ -402,9 +402,7 @@ async fn run_event_loop(
                         }
                     }
                     Some(UpdateMessage::ActionResult { conn_idx, result }) => {
-                        if conn_idx == app.active {
-                            app.set_action_result(result);
-                        }
+                        app.set_action_result(conn_idx, result);
                     }
                     Some(UpdateMessage::Status { conn_idx, status }) => {
                         if let Some(conn) = app.connection_mut(conn_idx) {

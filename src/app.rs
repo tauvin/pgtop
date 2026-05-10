@@ -289,6 +289,11 @@ pub struct ConnectionState {
     pub waits_table_state: TableState,
 
     pub stats: StatsHistory,
+
+    /// Last cancel/terminate action result on this connection. Persisted
+    /// per-connection so a result that arrives while the user is on
+    /// another conn isn't dropped — switching back surfaces it.
+    pub last_action_result: Option<ActionResult>,
 }
 
 /// One aggregated row in the Waits histogram. `count` is how many backends
@@ -336,6 +341,7 @@ impl ConnectionState {
             waits: Vec::new(),
             waits_table_state: TableState::default(),
             stats: StatsHistory::default(),
+            last_action_result: None,
         }
     }
 
@@ -645,7 +651,6 @@ pub struct App {
     pub mode: Mode,
     pub current_tab: Tab,
     pub theme: Theme,
-    pub last_action_result: Option<ActionResult>,
 
     /// Cancellation token for the in-flight EXPLAIN task, if any. Owned by
     /// `App` so any mode transition (close_modal, set_active, mode change)
@@ -666,7 +671,6 @@ impl App {
             mode: Mode::Normal,
             current_tab: Tab::Activity,
             theme: Theme::default(),
-            last_action_result: None,
             explain_cancel: None,
         }
     }
@@ -908,8 +912,12 @@ impl App {
         None
     }
 
-    pub fn set_action_result(&mut self, result: ActionResult) {
-        self.last_action_result = Some(result);
+    /// Stash an action result on the connection that produced it. The user
+    /// sees it whenever they're (or switch back) on that connection.
+    pub fn set_action_result(&mut self, conn_idx: usize, result: ActionResult) {
+        if let Some(conn) = self.connections.get_mut(conn_idx) {
+            conn.last_action_result = Some(result);
+        }
     }
 
     pub fn set_tab(&mut self, tab: Tab) {

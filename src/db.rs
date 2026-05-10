@@ -47,6 +47,16 @@ pub struct Backend {
     pub backend_type: Option<String>,
 }
 
+impl Backend {
+    /// Это одно из соединений pgtop'а? Проверяется через `application_name`,
+    /// который мы выставляем в `db::connect`. Используется для:
+    /// - визуальной серой подсветки таких строк в Activity-табе;
+    /// - блокировки cancel/terminate-actions на самих себя.
+    pub fn is_self(&self) -> bool {
+        self.application_name.as_deref() == Some("pgtop")
+    }
+}
+
 /// `pid <> pg_backend_pid()` отбрасывает нашу собственную сессию,
 /// чтобы pgtop не показывал сам себя в списке.
 const ACTIVITY_QUERY: &str = "
@@ -73,6 +83,8 @@ ORDER BY pid
 ";
 
 /// Подключается к Postgres по DSN; драйвер соединения детачится в фоновую таску.
+/// Сразу же помечает соединение `application_name = 'pgtop'` — для self-detection
+/// в Activity-табе и для DBA-видимости («это наш monitor»).
 ///
 /// Rust-специфика: `tokio_postgres::connect` возвращает `(Client, Connection)`.
 /// `Connection` — самостоятельный Future, который гоняет I/O TCP-сокета;
@@ -87,6 +99,13 @@ pub async fn connect(dsn: &str) -> Result<Client, DbError> {
             tracing::error!("postgres connection driver error: {e}");
         }
     });
+
+    // `application_name` видно в pg_stat_activity. Все наши соединения
+    // (5+ collector'ов + executor) получают одну и ту же метку — Backend
+    // умеет детектировать себя через `application_name == 'pgtop'`.
+    // Игнорируем ошибку: даже если SET не пройдёт, остальное должно работать
+    // — просто не сможем фильтровать self-rows.
+    let _ = client.execute("SET application_name = 'pgtop'", &[]).await;
 
     Ok(client)
 }

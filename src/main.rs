@@ -1,11 +1,15 @@
 use std::env;
+use std::path::PathBuf;
 
-use color_eyre::eyre::Result;
+use clap::Parser;
+use color_eyre::eyre::{Context, Result};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::EnvFilter;
 
+mod actions;
 mod app;
 mod collectors;
 mod db;
@@ -13,17 +17,33 @@ mod ui;
 mod views;
 mod widgets;
 
+use actions::{ActionCommand, ActionResult};
 use app::{App, Mode, Tab};
 use db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
 
 const DEFAULT_DSN: &str = "postgres://pgtop:pgtop@localhost:5433/pgtop";
 
+/// CLI-аргументы. На Phase 6 — только `--allow-actions`. Phase 7 расширит
+/// под profile-name, --read-only, --config и т.п.
+#[derive(Debug, Parser)]
+#[command(name = "pgtop", about = "Postgres activity TUI monitor")]
+struct Cli {
+    /// Разрешить cancel/terminate-actions на backend'ах. По умолчанию выключено
+    /// для безопасности прод-мониторинга. Без флага хоткеи `c`/`K` no-op.
+    #[arg(long)]
+    allow_actions: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
+    let cli = Cli::parse();
 
-    // Phase 3: TUI владеет stdout/stderr внутри alternate screen. tracing
-    // вернётся в Phase 7 через `tracing-appender` в файл.
+    // Tracing → файл, не stdout/stderr (TUI владеет терминалом). Guard держим
+    // в main до конца — при дропе non-blocking writer flush'нет буфер. Без
+    // удержания guard'а строки могут потеряться, если процесс резко выйдет.
+    let _log_guard = init_audit_log()?;
+    tracing::info!(allow_actions = cli.allow_actions, "pgtop starting");
 
     let dsn = env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DSN.to_string());
     // Каждый collector получает свой connection через отдельный `db::connect`.
@@ -36,6 +56,10 @@ async fn main() -> Result<()> {
     let client_top_queries = db::connect(&dsn).await?;
     let client_replication = db::connect(&dsn).await?;
     let client_stats = db::connect(&dsn).await?;
+    // Action executor — отдельное соединение, не конкурирует с collector'ами.
+    // Запросы pg_cancel_backend/pg_terminate_backend сами по себе мгновенные,
+    // но если бы шли через общий driver, могли бы блочиться за collector'ами.
+    let client_actions = db::connect(&dsn).await?;
 
     // watch::channel(initial) — latest-wins канал. Sender хранит ровно одно
     // значение, при `send` оно заменяется; Receiver-ы видят новую версию через
@@ -56,6 +80,11 @@ async fn main() -> Result<()> {
         active_connections: 0,
         cache_hit_pct: 100.0,
     });
+
+    // Actions: mpsc для команд (multiple producers — main task посылает по
+    // мере хоткеев), watch для результата (latest-wins, UI читает последний).
+    let (action_tx, action_rx) = mpsc::unbounded_channel::<ActionCommand>();
+    let (action_result_tx, action_result_rx) = watch::channel::<Option<ActionResult>>(None);
 
     // CancellationToken — shared cancel-флаг с нотификацией. clone() шарит
     // underlying state (внутри Arc<...>); cancel с любого клона видят все.
@@ -88,8 +117,14 @@ async fn main() -> Result<()> {
         stats_tx,
         cancel.clone(),
     ));
+    let action_handle = tokio::spawn(actions::run_action_executor(
+        client_actions,
+        action_rx,
+        action_result_tx,
+        cancel.clone(),
+    ));
 
-    let mut app = App::new();
+    let mut app = App::new(cli.allow_actions);
     let mut term = ui::TerminalGuard::new()?;
     let loop_result = run_event_loop(
         term.terminal(),
@@ -99,6 +134,8 @@ async fn main() -> Result<()> {
         top_queries_rx,
         replication_rx,
         stats_rx,
+        action_tx,
+        action_result_rx,
     )
     .await;
 
@@ -117,6 +154,7 @@ async fn main() -> Result<()> {
         top_queries_handle,
         replication_handle,
         stats_handle,
+        action_handle,
     );
 
     loop_result
@@ -133,6 +171,7 @@ async fn main() -> Result<()> {
 /// перерисовывает кадр по событию любого типа: на любую клавишу или новый
 /// snapshot UI обновляется сразу. Никаких 60fps-tick'ов: render строго по
 /// причине, ratatui-diff делает no-op-кадры дешёвыми.
+#[allow(clippy::too_many_arguments)] // 7 channels + terminal + app — refactor in Phase 7
 async fn run_event_loop(
     terminal: &mut ui::Tui,
     app: &mut App,
@@ -141,6 +180,8 @@ async fn run_event_loop(
     mut top_queries_rx: watch::Receiver<TopQueriesSnapshot>,
     mut replication_rx: watch::Receiver<Vec<Replica>>,
     mut stats_rx: watch::Receiver<Stats>,
+    action_tx: mpsc::UnboundedSender<ActionCommand>,
+    mut action_result_rx: watch::Receiver<Option<ActionResult>>,
 ) -> Result<()> {
     let mut events = EventStream::new();
 
@@ -198,6 +239,19 @@ async fn run_event_loop(
                                 KeyCode::Char('S') if app.current_tab == Tab::Activity => {
                                     app.toggle_sort_direction()
                                 }
+                                // `c` (Activity, --allow-actions, не self):
+                                // открыть confirm-cancel модалку.
+                                KeyCode::Char('c') => {
+                                    app.try_open_confirm_cancel();
+                                }
+                                // `K` (Shift+k) — terminate с type-yes-confirm.
+                                // Crossterm на большинстве терминалов
+                                // прислывает заглавную букву как Char('K')
+                                // (с modifier SHIFT или без — зависит от
+                                // терминала). Match только на код символа.
+                                KeyCode::Char('K') => {
+                                    app.try_open_confirm_terminate();
+                                }
                                 _ => {}
                             },
                             Mode::Detail(_) => match key.code {
@@ -212,6 +266,38 @@ async fn run_event_loop(
                                 // стрелки курсора, Ctrl+U, Home/End...)
                                 // forward'им в tui-input.
                                 _ => app.handle_filter_input(key),
+                            },
+                            Mode::ConfirmCancel(pid) => match key.code {
+                                KeyCode::Enter => {
+                                    let pid = *pid;
+                                    // try_send / non-blocking: event-loop не
+                                    // ждёт executor'а, результат прилетит
+                                    // через action_result_rx.changed().
+                                    let _ = action_tx
+                                        .send(ActionCommand::Cancel { pid });
+                                    app.close_modal();
+                                }
+                                KeyCode::Esc => app.close_modal(),
+                                _ => {}
+                            },
+                            Mode::ConfirmTerminate(_, _) => match key.code {
+                                // Esc — abort всегда. Enter — отправить только
+                                // если text == "yes" (проверяет
+                                // try_confirm_terminate). Иначе модалка
+                                // остаётся открытой — anti-fool design.
+                                KeyCode::Esc => app.close_modal(),
+                                KeyCode::Enter => {
+                                    if let Some(pid) = app.try_confirm_terminate() {
+                                        let _ = action_tx
+                                            .send(ActionCommand::Terminate { pid });
+                                    }
+                                }
+                                KeyCode::Backspace => app.terminate_input_backspace(),
+                                // Любые символы (включая `q`, `K`, цифры) —
+                                // часть набора подтверждения. Esc и Enter
+                                // выловлены выше, поэтому здесь они не помешают.
+                                KeyCode::Char(c) => app.terminate_input_push(c),
+                                _ => {}
                             },
                         }
                     }
@@ -280,7 +366,52 @@ async fn run_event_loop(
                 }
             }
 
+            // Action result от executor'а — обновить status-line.
+            res = action_result_rx.changed() => {
+                match res {
+                    Ok(()) => {
+                        let snapshot = action_result_rx.borrow_and_update().clone();
+                        if let Some(result) = snapshot {
+                            app.set_action_result(result);
+                        }
+                    }
+                    Err(_) => return Ok(()),
+                }
+            }
+
             _ = tokio::signal::ctrl_c() => return Ok(()),
         }
     }
+}
+
+/// Tracing → файл `~/.pgtop/pgtop.log` (или `./pgtop.log` если HOME пустой).
+/// Returns `WorkerGuard` — non-blocking writer запускает фоновый поток-writer,
+/// guard управляет его жизнью. Дропать guard слишком рано = терять последние
+/// записи (background-writer не успеет flush'нуть). Поэтому держим до конца main.
+///
+/// Phase 6: вся audit-инфа про cancel/terminate-actions полетит сюда через
+/// `tracing::info!(target: "audit", ...)`. Фильтр RUST_LOG позволяет
+/// раздельно настроить уровни для audit и других target'ов.
+fn init_audit_log() -> Result<tracing_appender::non_blocking::WorkerGuard> {
+    let log_dir = match env::var("HOME") {
+        Ok(home) => PathBuf::from(home).join(".pgtop"),
+        Err(_) => PathBuf::from("."),
+    };
+    std::fs::create_dir_all(&log_dir).wrap_err("create pgtop log dir")?;
+
+    // `never` — не ротируем: для TUI-сессий длиной в часы-дни overkill.
+    // Phase 7 — переезд на `daily` + XDG_STATE_HOME, если действительно нужно.
+    let file_appender = tracing_appender::rolling::never(&log_dir, "pgtop.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        // Без ANSI-кодов в файле — иначе grep будет ловить escape-символы.
+        .with_ansi(false)
+        .init();
+
+    Ok(guard)
 }

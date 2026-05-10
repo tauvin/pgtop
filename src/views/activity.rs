@@ -83,13 +83,19 @@ fn backend_to_row(b: &Backend, now: DateTime<Utc>) -> Row<'static> {
 }
 
 /// Стиль строки исходя из state и duration активного запроса.
-/// Приоритет: красный > жёлтый > зелёный > default.
+/// Приоритет: self > красный > жёлтый > зелёный > default.
+/// - **Self** (pgtop собственное соединение): тёмно-серый — отдельный визуальный
+///   класс, чтобы пользователь видел «это я и cancel'ить нельзя».
 /// - Красный: active-запрос дольше 10с (визуальный сигнал «долгий»).
 /// - Жёлтый: idle in transaction (потенциально удерживает локи / vacuum).
 /// - Зелёный: обычный active (≤10с).
 /// - Default: idle-сессии, fastpath function call и т.п.
 fn row_style(b: &Backend, now: DateTime<Utc>) -> Style {
     const LONG_QUERY_THRESHOLD_SECS: i64 = 10;
+
+    if b.is_self() {
+        return Style::new().fg(Color::DarkGray);
+    }
 
     let state = b.state.as_deref();
 

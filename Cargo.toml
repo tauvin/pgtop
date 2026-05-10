@@ -16,6 +16,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 thiserror = "2"
 color-eyre = "0.6"
 tokio-util = "0.7"

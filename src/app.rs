@@ -14,6 +14,7 @@ use ratatui::widgets::TableState;
 use regex::{Regex, RegexBuilder};
 use tui_input::{Input, InputRequest};
 
+use crate::actions::ActionResult;
 use crate::db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
 
 /// Активный таб TUI. Каждый таб — отдельный «view» с собственными данными
@@ -62,11 +63,21 @@ impl Tab {
 ///
 /// `Filter` — режим редактирования фильтра. Сам текст и regex живут в
 /// `App.filter`, чтобы переживать выход из режима (Enter коммитит, Esc отменяет).
+///
+/// `ConfirmCancel(pid)` — модалка подтверждения cancel-action на выбранном
+/// backend'е. Enter → отправить команду, Esc → отменить.
+///
+/// `ConfirmTerminate(pid, String)` — destructive terminate. String хранит
+/// набранный пользователем текст; команда отправляется только если `== "yes"`.
+/// Это анти-fool design: невозможно случайно подтвердить, нужно явно
+/// набрать три буквы.
 #[derive(Debug, Clone)]
 pub enum Mode {
     Normal,
     Detail(i32),
     Filter,
+    ConfirmCancel(i32),
+    ConfirmTerminate(i32, String),
 }
 
 /// Состояние regex-фильтра. Применяется к полю `query` каждого backend'а.
@@ -222,10 +233,20 @@ pub struct App {
     pub filter: Filter,
     pub sort: Sort,
     pub current_tab: Tab,
+
+    /// Phase 6: разрешены ли cancel/terminate-actions. Контролируется
+    /// CLI-флагом `--allow-actions`. По умолчанию false — безопасный default
+    /// для prod-мониторинга, чтобы случайно не послать pg_cancel_backend.
+    pub actions_allowed: bool,
+
+    /// Последний результат action'а от executor'а — отображается в status-line
+    /// (filter-line area). `None` пока ни одной команды не было; иначе самый
+    /// свежий результат.
+    pub last_action_result: Option<ActionResult>,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(actions_allowed: bool) -> Self {
         Self {
             backends: Vec::new(),
             filtered: Vec::new(),
@@ -241,6 +262,8 @@ impl App {
             filter: Filter::default(),
             sort: Sort::default(),
             current_tab: Tab::Activity,
+            actions_allowed,
+            last_action_result: None,
         }
     }
 
@@ -285,14 +308,21 @@ impl App {
         }
     }
 
-    /// Обновить snapshot. Заодно пересчитываем filtered и закрываем
-    /// Detail-модалку, если её pid исчез.
+    /// Обновить snapshot. Заодно пересчитываем filtered и закрываем модалку
+    /// (Detail/ConfirmCancel), если её pid исчез из снапшота.
     pub fn set_backends(&mut self, backends: Vec<Backend>) {
         self.backends = backends;
         self.recompute_filtered();
 
-        if let Mode::Detail(pid) = &self.mode
-            && !self.backends.iter().any(|b| b.pid == *pid)
+        // Все pid-bound модалки авто-закрываются на смерть выбранного pid'а:
+        // Detail/ConfirmCancel/ConfirmTerminate — общая логика.
+        let active_pid = match &self.mode {
+            Mode::Detail(pid) | Mode::ConfirmCancel(pid) => Some(*pid),
+            Mode::ConfirmTerminate(pid, _) => Some(*pid),
+            _ => None,
+        };
+        if let Some(pid) = active_pid
+            && !self.backends.iter().any(|b| b.pid == pid)
         {
             self.mode = Mode::Normal;
         }
@@ -474,6 +504,81 @@ impl App {
     /// Закрыть Detail / другую модалку, вернуться в Normal.
     pub fn close_modal(&mut self) {
         self.mode = Mode::Normal;
+    }
+
+    /// Хоткей `c` (Activity, actions_allowed): открыть confirm-cancel модалку
+    /// для выбранного backend'а. Игнорируем self-backend'ы (pgtop'овские
+    /// собственные соединения) — нельзя cancel'ить свой же запрос.
+    /// Возвращает true если модалка открылась — main по этому смотрит,
+    /// нужно ли что-то ещё делать.
+    pub fn try_open_confirm_cancel(&mut self) -> bool {
+        if !self.actions_allowed || self.current_tab != Tab::Activity {
+            return false;
+        }
+        let Some(idx) = self.table_state.selected() else {
+            return false;
+        };
+        let Some(b) = self.visible_backend(idx) else {
+            return false;
+        };
+        if b.is_self() {
+            return false;
+        }
+        self.mode = Mode::ConfirmCancel(b.pid);
+        true
+    }
+
+    /// Записать результат action'а. Вызывается, когда executor
+    /// прислал свежий ActionResult.
+    pub fn set_action_result(&mut self, result: ActionResult) {
+        self.last_action_result = Some(result);
+    }
+
+    /// Хоткей `K` (Activity, actions_allowed): открыть confirm-terminate
+    /// модалку. Те же предохранители, что и для cancel: только Activity, только
+    /// не-self-row.
+    pub fn try_open_confirm_terminate(&mut self) -> bool {
+        if !self.actions_allowed || self.current_tab != Tab::Activity {
+            return false;
+        }
+        let Some(idx) = self.table_state.selected() else {
+            return false;
+        };
+        let Some(b) = self.visible_backend(idx) else {
+            return false;
+        };
+        if b.is_self() {
+            return false;
+        }
+        self.mode = Mode::ConfirmTerminate(b.pid, String::new());
+        true
+    }
+
+    /// Добавить символ в текст подтверждения terminate. No-op в других режимах.
+    pub fn terminate_input_push(&mut self, c: char) {
+        if let Mode::ConfirmTerminate(_, text) = &mut self.mode {
+            text.push(c);
+        }
+    }
+
+    /// Удалить последний символ. No-op в других режимах.
+    pub fn terminate_input_backspace(&mut self) {
+        if let Mode::ConfirmTerminate(_, text) = &mut self.mode {
+            text.pop();
+        }
+    }
+
+    /// Если в `Mode::ConfirmTerminate` и набрано ровно `yes` — закрыть модалку
+    /// и вернуть pid (caller отправит команду executor'у). Иначе — None.
+    pub fn try_confirm_terminate(&mut self) -> Option<i32> {
+        if let Mode::ConfirmTerminate(pid, text) = &self.mode
+            && text == "yes"
+        {
+            let pid = *pid;
+            self.close_modal();
+            return Some(pid);
+        }
+        None
     }
 
     /// Войти в режим редактирования фильтра. Существующий input/regex

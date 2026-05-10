@@ -13,7 +13,7 @@ use crate::app::{App, Mode, Tab};
 
 pub fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = match &app.mode {
-        Mode::Normal => normal_hints(app.current_tab),
+        Mode::Normal => normal_hints(app.current_tab, app.actions_allowed),
         Mode::Detail(_) => Line::from(vec![
             Span::raw(" "),
             "Esc".bold(),
@@ -28,6 +28,22 @@ pub fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             "Esc".bold(),
             Span::raw(" cancel"),
         ]),
+        Mode::ConfirmCancel(_) => Line::from(vec![
+            Span::raw(" "),
+            "Enter".bold(),
+            Span::raw(" confirm  ·  "),
+            "Esc".bold(),
+            Span::raw(" abort"),
+        ]),
+        Mode::ConfirmTerminate(_, _) => Line::from(vec![
+            Span::raw(" type "),
+            "yes".bold(),
+            Span::raw(" + "),
+            "Enter".bold(),
+            Span::raw(" to confirm  ·  "),
+            "Esc".bold(),
+            Span::raw(" abort"),
+        ]),
     };
 
     let footer = Paragraph::new(line).style(Style::new().dim());
@@ -37,7 +53,7 @@ pub fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 /// Хинты для Normal mode зависят от current_tab. ↑↓-нав работает везде
 /// (select_previous/next сами no-op для табов без list); Activity получает
 /// расширенный набор (Enter/filter/sort).
-fn normal_hints(tab: Tab) -> Line<'static> {
+fn normal_hints(tab: Tab, actions_allowed: bool) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = vec![
         Span::raw(" "),
         "q".bold(),
@@ -60,6 +76,20 @@ fn normal_hints(tab: Tab) -> Line<'static> {
             "S".bold(),
             Span::raw(" sort"),
         ]);
+
+        if actions_allowed {
+            spans.extend([
+                Span::raw("  ·  "),
+                "c".bold().yellow(),
+                Span::raw(" cancel").yellow(),
+                Span::raw("  ·  "),
+                "K".bold().red(),
+                Span::raw(" terminate").red(),
+            ]);
+        }
+    } else if actions_allowed {
+        // На не-Activity табах — просто индикатор режима.
+        spans.extend([Span::raw("  ·  "), "actions".bold().yellow()]);
     }
 
     Line::from(spans)

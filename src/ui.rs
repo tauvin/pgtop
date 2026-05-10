@@ -22,7 +22,7 @@ use crate::{
     app::{App, Mode, Tab},
     db::TopQueriesSnapshot,
     views::{render_activity, render_locks, render_replication, render_top_queries},
-    widgets::{detail, filter_line, footer, sparklines, tabs},
+    widgets::{confirm, detail, filter_line, footer, sparklines, tabs},
 };
 
 /// `ratatui::Terminal` параметризован backend'ом. `CrosstermBackend<Stdout>` —
@@ -122,12 +122,22 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     filter_line::render_filter_line(frame, filter_area, app);
     footer::render_footer(frame, footer_area, app);
 
-    // Detail-popup поверх всего: overlay рисуется последним.
-    if let Mode::Detail(pid) = &app.mode {
-        let pid = *pid;
-        if let Some(b) = app.backends.iter().find(|b| b.pid == pid) {
-            detail::render_detail(frame, area, b);
+    // Modal overlays — рисуются последними поверх всего. Только один
+    // активный режим за раз, поэтому match без конфликта.
+    match &app.mode {
+        Mode::Detail(pid) => {
+            let pid = *pid;
+            if let Some(b) = app.backends.iter().find(|b| b.pid == pid) {
+                detail::render_detail(frame, area, b);
+            }
         }
+        Mode::ConfirmCancel(pid) => {
+            confirm::render_confirm_cancel(frame, area, *pid);
+        }
+        Mode::ConfirmTerminate(pid, typed) => {
+            confirm::render_confirm_terminate(frame, area, *pid, typed);
+        }
+        _ => {}
     }
 }
 

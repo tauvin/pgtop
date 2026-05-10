@@ -7,7 +7,9 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, 
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer, filter};
 
 mod actions;
 mod app;
@@ -437,25 +439,84 @@ async fn run_event_loop(
     }
 }
 
-/// Initialise tracing to a log file in the XDG state directory. Returns the
-/// `WorkerGuard` for the non-blocking writer; must be held until the end of
-/// `main` so background-flushed records aren't lost.
-fn init_audit_log() -> Result<tracing_appender::non_blocking::WorkerGuard> {
+/// Worker-guards for the two non-blocking writers — must outlive `main`
+/// so background-flushed records aren't lost.
+struct LogGuards {
+    _app: tracing_appender::non_blocking::WorkerGuard,
+    _audit: tracing_appender::non_blocking::WorkerGuard,
+}
+
+/// Initialise two-sink tracing:
+/// - Application log: `pgtop.log.YYYY-MM-DD` rotated daily, all targets
+///   except `audit`. Honours `RUST_LOG`.
+/// - Audit log: `pgtop-audit.log.YYYY-MM-DD` rotated daily, only events
+///   with `target = "audit"` (cancel/terminate executions).
+///
+/// Both files are created with mode `0600` on Unix so other users on a
+/// shared host can't read who was cancelled / terminated.
+fn init_audit_log() -> Result<LogGuards> {
     let log_dir = resolve_log_dir();
     std::fs::create_dir_all(&log_dir).wrap_err("create pgtop log dir")?;
 
-    let file_appender = tracing_appender::rolling::never(&log_dir, "pgtop.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o700));
+    }
 
-    tracing_subscriber::fmt()
-        .with_writer(non_blocking)
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+    let app_appender = tracing_appender::rolling::daily(&log_dir, "pgtop.log");
+    let (app_writer, app_guard) = tracing_appender::non_blocking(app_appender);
+
+    let audit_appender = tracing_appender::rolling::daily(&log_dir, "pgtop-audit.log");
+    let (audit_writer, audit_guard) = tracing_appender::non_blocking(audit_appender);
+
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let app_layer = tracing_subscriber::fmt::layer()
+        .with_writer(app_writer)
         .with_ansi(false)
+        // Drop audit events from the app log to avoid duplication.
+        .with_filter(filter::filter_fn(|m| m.target() != "audit"));
+
+    let audit_layer = tracing_subscriber::fmt::layer()
+        .with_writer(audit_writer)
+        .with_ansi(false)
+        // Audit must always record regardless of RUST_LOG: a user who
+        // bumps RUST_LOG=warn to silence noise should not also lose
+        // audit trail of their own cancel/terminate actions.
+        .with_filter(filter::Targets::new().with_target("audit", tracing::Level::INFO));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(app_layer)
+        .with(audit_layer)
         .init();
 
-    Ok(guard)
+    #[cfg(unix)]
+    restrict_log_files(&log_dir);
+
+    Ok(LogGuards {
+        _app: app_guard,
+        _audit: audit_guard,
+    })
+}
+
+/// Tighten permissions to 0600 on every existing pgtop log file. Called
+/// after the appenders create today's files. Idempotent — applies on
+/// every start.
+#[cfg(unix)]
+fn restrict_log_files(log_dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let s = name.to_string_lossy();
+        if s.starts_with("pgtop.log") || s.starts_with("pgtop-audit.log") {
+            let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o600));
+        }
+    }
 }
 
 /// Resolve the directory used for the pgtop log file. Honours

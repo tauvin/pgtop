@@ -90,6 +90,7 @@ pgtop --allow-actions
 | `K`             | Terminate session (`pg_terminate_backend`)          |
 | `Alt+1..9`      | Switch active connection (multi-conn mode)          |
 | `Esc`           | Close modal                                         |
+| `g`             | Activity: jump to pid (type digits, Enter)         |
 | `q` / `Ctrl+C`  | Quit                                                |
 
 The mouse scroll-wheel scrolls the active table. Mouse capture is on, so

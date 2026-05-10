@@ -45,6 +45,13 @@ pub fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             Span::raw(" abort"),
         ]),
         Mode::Explain(_) => Line::from(vec![Span::raw(" "), "Esc".bold(), Span::raw(" close")]),
+        Mode::JumpToPid(_) => Line::from(vec![
+            Span::raw(" "),
+            "Enter".bold(),
+            Span::raw(" jump  ·  "),
+            "Esc".bold(),
+            Span::raw(" cancel"),
+        ]),
     };
 
     let footer = Paragraph::new(line).style(Style::new().dim());
@@ -78,7 +85,9 @@ fn normal_hints(tab: Tab, actions_allowed: bool, multi_conn: bool) -> Line<'stat
             "S".bold(),
             Span::raw(" sort  ·  "),
             "e".bold(),
-            Span::raw(" explain"),
+            Span::raw(" explain  ·  "),
+            "g".bold(),
+            Span::raw(" jump"),
         ]);
 
         if actions_allowed {

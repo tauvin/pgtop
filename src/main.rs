@@ -266,6 +266,9 @@ async fn run_event_loop(
                                 KeyCode::Char('K') => {
                                     app.try_open_confirm_terminate();
                                 }
+                                KeyCode::Char('g') if app.current_tab == Tab::Activity => {
+                                    app.enter_jump_mode();
+                                }
                                 KeyCode::Char('e') if app.current_tab == Tab::Activity => {
                                     if let Some((pid, query)) = app.selected_query() {
                                         app.mode = Mode::Explain(ExplainPopup::Loading { pid });
@@ -287,6 +290,15 @@ async fn run_event_loop(
                             },
                             Mode::Explain(_) => match key.code {
                                 KeyCode::Esc | KeyCode::Char('q') => app.close_modal(),
+                                _ => {}
+                            },
+                            Mode::JumpToPid(_) => match key.code {
+                                KeyCode::Esc => app.close_modal(),
+                                KeyCode::Enter => {
+                                    let _ = app.try_jump_to_pid();
+                                }
+                                KeyCode::Backspace => app.jump_input_pop(),
+                                KeyCode::Char(c) => app.jump_input_push(c),
                                 _ => {}
                             },
                             Mode::Filter => match key.code {

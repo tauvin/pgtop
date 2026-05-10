@@ -21,6 +21,8 @@ pub fn render_filter_line(frame: &mut Frame, area: Rect, app: &App) {
     let conn = app.active();
     let line = if matches!(app.mode, Mode::Filter) {
         filter_input_line(conn)
+    } else if let Mode::JumpToPid(ref input) = app.mode {
+        jump_input_line(input)
     } else if conn.filter.regex.is_some() {
         filter_status_line(conn)
     } else if let Some(result) = &app.last_action_result {
@@ -30,6 +32,14 @@ pub fn render_filter_line(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     frame.render_widget(Paragraph::new(line), area);
+}
+
+fn jump_input_line(input: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" jump to pid: "),
+        Span::raw(input.to_string()).bold(),
+        "█".bold(),
+    ])
 }
 
 fn filter_input_line(conn: &crate::app::ConnectionState) -> Line<'static> {

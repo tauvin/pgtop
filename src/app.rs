@@ -78,6 +78,8 @@ pub enum Mode {
     ConfirmCancel(i32),
     ConfirmTerminate(i32, String),
     Explain(ExplainPopup),
+    /// Jump-to-pid mode on the Activity tab. Holds the digits typed so far.
+    JumpToPid(String),
 }
 
 /// State of the EXPLAIN popup: `Loading` while the query runs, `Ready`
@@ -717,6 +719,57 @@ impl App {
 
     pub fn close_modal(&mut self) {
         self.mode = Mode::Normal;
+    }
+
+    /// Enter jump-to-pid mode (Activity tab only). Initialises an empty
+    /// digit buffer; user types digits, Enter jumps, Esc cancels.
+    pub fn enter_jump_mode(&mut self) {
+        if self.current_tab == Tab::Activity {
+            self.mode = Mode::JumpToPid(String::new());
+        }
+    }
+
+    /// Append a digit to the jump-to-pid input. No-op outside that mode or
+    /// for non-digit characters.
+    pub fn jump_input_push(&mut self, c: char) {
+        if let Mode::JumpToPid(ref mut s) = self.mode
+            && c.is_ascii_digit()
+            && s.len() < 10
+        {
+            s.push(c);
+        }
+    }
+
+    pub fn jump_input_pop(&mut self) {
+        if let Mode::JumpToPid(ref mut s) = self.mode {
+            s.pop();
+        }
+    }
+
+    /// Try to jump the Activity selection to the typed pid. Returns
+    /// `Ok(())` if the pid exists in the filtered list (selection updated,
+    /// mode reset to Normal); `Err(_)` if the input parses but the pid is
+    /// not visible.
+    pub fn try_jump_to_pid(&mut self) -> Result<(), &'static str> {
+        let Mode::JumpToPid(ref s) = self.mode else {
+            return Err("not in jump mode");
+        };
+        let Ok(pid) = s.parse::<i32>() else {
+            return Err("invalid pid");
+        };
+        let conn = self.active_mut();
+        let idx = conn
+            .filtered
+            .iter()
+            .position(|&i| conn.backends.get(i).is_some_and(|b| b.pid == pid));
+        match idx {
+            Some(i) => {
+                conn.table_state.select(Some(i));
+                self.mode = Mode::Normal;
+                Ok(())
+            }
+            None => Err("pid not in current filter"),
+        }
     }
 
     pub fn try_open_confirm_cancel(&mut self) -> bool {

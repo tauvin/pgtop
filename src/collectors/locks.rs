@@ -1,24 +1,22 @@
-//! Сборщик `pg_locks`: опрашивает раз в секунду, публикует
-//! `Vec<Lock>` через `watch::channel`. Структурно идентичен activity-collector'у —
-//! отличие только в SQL и snapshot-типе.
+//! Сборщик `pg_locks`: опрашивает раз в секунду, публикует через
+//! shared `mpsc::UnboundedSender<UpdateMessage>` (Phase 8 Block B).
 
 use std::time::Duration;
 
 use tokio::{
-    sync::watch,
+    sync::mpsc,
     time::{MissedTickBehavior, interval},
 };
 use tokio_postgres::Client;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::{self, Lock};
+use crate::db;
+use crate::messages::UpdateMessage;
 
-/// Контракт идентичен `run_activity_collector`. См. `collectors/activity.rs`
-/// за подробностями про `biased;`-cancel-семантику и сигнал «UI ушёл» через
-/// `tx.send().is_err()`.
 pub async fn run_locks_collector(
     client: Client,
-    tx: watch::Sender<Vec<Lock>>,
+    tx: mpsc::UnboundedSender<UpdateMessage>,
+    conn_idx: usize,
     cancel: CancellationToken,
     poll_interval: Duration,
 ) {
@@ -38,13 +36,12 @@ pub async fn run_locks_collector(
             r = db::fetch_locks(&client) => r,
         };
 
-        match result {
-            Ok(locks) => {
-                if tx.send(locks).is_err() {
-                    break;
-                }
-            }
-            Err(_) => continue,
+        if let Ok(snapshot) = result
+            && tx
+                .send(UpdateMessage::Locks { conn_idx, snapshot })
+                .is_err()
+        {
+            break;
         }
     }
 }

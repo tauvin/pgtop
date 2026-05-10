@@ -1,22 +1,21 @@
-//! Сборщик `pg_stat_statements`: 10-секундный интервал (статистика
-//! агрегатная, чаще опрашивать смысла нет). Отличается от activity/locks
-//! тем, что extension может быть не установлен — fetch возвращает
-//! `TopQueriesSnapshot` с тремя состояниями (см. db.rs), а не голый Vec.
+//! Сборщик `pg_stat_statements`: 10-секундный интервал, three-state snapshot.
 
 use std::time::Duration;
 
 use tokio::{
-    sync::watch,
+    sync::mpsc,
     time::{MissedTickBehavior, interval},
 };
 use tokio_postgres::Client;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::{self, TopQueriesSnapshot};
+use crate::db;
+use crate::messages::UpdateMessage;
 
 pub async fn run_top_queries_collector(
     client: Client,
-    tx: watch::Sender<TopQueriesSnapshot>,
+    tx: mpsc::UnboundedSender<UpdateMessage>,
+    conn_idx: usize,
     cancel: CancellationToken,
     poll_interval: Duration,
 ) {
@@ -36,13 +35,12 @@ pub async fn run_top_queries_collector(
             r = db::fetch_top_queries(&client) => r,
         };
 
-        match result {
-            Ok(snapshot) => {
-                if tx.send(snapshot).is_err() {
-                    break;
-                }
-            }
-            Err(_) => continue,
+        if let Ok(snapshot) = result
+            && tx
+                .send(UpdateMessage::TopQueries { conn_idx, snapshot })
+                .is_err()
+        {
+            break;
         }
     }
 }

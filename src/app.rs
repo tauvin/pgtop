@@ -491,15 +491,11 @@ impl App {
         }
     }
 
-    /// Set backends на активное соединение. Заодно проверяем, не исчез ли
-    /// pid из активной модалки (Detail/ConfirmCancel/ConfirmTerminate) —
-    /// если да, закрываем модалку.
-    pub fn set_backends(&mut self, backends: Vec<Backend>) {
-        self.active_mut().set_backends(backends);
-        self.maybe_close_dead_modal();
-    }
-
-    fn maybe_close_dead_modal(&mut self) {
+    /// Закрыть модалку, если её pid исчез из активного соединения.
+    /// Phase 8 Block B: вызывается из main после `connection_mut(idx).set_backends`,
+    /// но только если `idx == app.active` — иначе модалка не относится к
+    /// обновляемому коннекту.
+    pub fn maybe_close_dead_modal(&mut self) {
         let active_pid = match &self.mode {
             Mode::Detail(pid) | Mode::ConfirmCancel(pid) => Some(*pid),
             Mode::ConfirmTerminate(pid, _) => Some(*pid),
@@ -510,22 +506,6 @@ impl App {
         {
             self.mode = Mode::Normal;
         }
-    }
-
-    pub fn set_locks(&mut self, locks: Vec<Lock>) {
-        self.active_mut().set_locks(locks);
-    }
-
-    pub fn set_top_queries(&mut self, snapshot: TopQueriesSnapshot) {
-        self.active_mut().set_top_queries(snapshot);
-    }
-
-    pub fn set_replication(&mut self, replication: Vec<Replica>) {
-        self.active_mut().set_replication(replication);
-    }
-
-    pub fn push_stats(&mut self, stats: Stats) {
-        self.active_mut().push_stats(stats);
     }
 
     pub fn select_previous(&mut self) {

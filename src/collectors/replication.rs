@@ -1,21 +1,21 @@
-//! Сборщик `pg_stat_replication`: 5-секундный интервал — реплика-state
-//! меняется медленно. У большинства настроек таблица будет пустая (нет
-//! активных реплик), поэтому view нужно уметь показывать empty state.
+//! Сборщик `pg_stat_replication`: 5-секундный интервал.
 
 use std::time::Duration;
 
 use tokio::{
-    sync::watch,
+    sync::mpsc,
     time::{MissedTickBehavior, interval},
 };
 use tokio_postgres::Client;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::{self, Replica};
+use crate::db;
+use crate::messages::UpdateMessage;
 
 pub async fn run_replication_collector(
     client: Client,
-    tx: watch::Sender<Vec<Replica>>,
+    tx: mpsc::UnboundedSender<UpdateMessage>,
+    conn_idx: usize,
     cancel: CancellationToken,
     poll_interval: Duration,
 ) {
@@ -35,13 +35,12 @@ pub async fn run_replication_collector(
             r = db::fetch_replication(&client) => r,
         };
 
-        match result {
-            Ok(replicas) => {
-                if tx.send(replicas).is_err() {
-                    break;
-                }
-            }
-            Err(_) => continue,
+        if let Ok(snapshot) = result
+            && tx
+                .send(UpdateMessage::Replication { conn_idx, snapshot })
+                .is_err()
+        {
+            break;
         }
     }
 }

@@ -1,33 +1,28 @@
 //! Сборщик сводных метрик для шапки: TPS, active connections, cache hit %.
-//!
-//! TPS вычисляется как дельта `xact_commit + xact_rollback` между двумя
-//! snapshot'ами, поделённая на прошедшее время. Collector держит state
-//! локально (predыдущий snapshot + момент времени) — это отличает его
-//! от других collector'ов проекта, которые stateless.
+//! Stateful — держит prev-snapshot для diff'а TPS.
 
 use std::time::{Duration, Instant};
 
 use tokio::{
-    sync::watch,
+    sync::mpsc,
     time::{MissedTickBehavior, interval},
 };
 use tokio_postgres::Client;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::{self, Stats};
+use crate::messages::UpdateMessage;
 
 pub async fn run_stats_collector(
     client: Client,
-    tx: watch::Sender<Stats>,
+    tx: mpsc::UnboundedSender<UpdateMessage>,
+    conn_idx: usize,
     cancel: CancellationToken,
     poll_interval: Duration,
 ) {
     let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    // Local state — сохраняется между итерациями цикла.
-    // На первом tick'е prev = None → TPS = 0.0 (нет diff'а), но snapshot
-    // запишется в prev для следующего вычисления.
     let mut prev_xacts: Option<i64> = None;
     let mut prev_time: Option<Instant> = None;
 
@@ -59,20 +54,22 @@ pub async fn run_stats_collector(
                     0.0
                 }
             }
-            // Первый tick — ещё нет prev для diff'а.
             _ => 0.0,
         };
 
         prev_xacts = Some(raw.xacts);
         prev_time = Some(now);
 
-        let stats = Stats {
+        let snapshot = Stats {
             tps,
             active_connections: raw.active_connections,
             cache_hit_pct: raw.cache_hit_pct,
         };
 
-        if tx.send(stats).is_err() {
+        if tx
+            .send(UpdateMessage::Stats { conn_idx, snapshot })
+            .is_err()
+        {
             break;
         }
     }

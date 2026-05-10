@@ -5,7 +5,7 @@ use clap::Parser;
 use color_eyre::eyre::{Context, Result};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -14,28 +14,33 @@ mod app;
 mod collectors;
 mod config;
 mod db;
+mod messages;
 mod theme;
 mod ui;
 mod views;
 mod widgets;
 
-use actions::{ActionCommand, ActionResult};
+use actions::ActionCommand;
 use app::{App, ConnectionState, Mode, Tab};
-use db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
+use config::Resolved;
+use messages::UpdateMessage;
 
-/// CLI-аргументы. Phase 7: добавлены `profile` (positional), `--dsn`,
-/// `--read-only`. Resolved-логика layered'ов в `config::Resolved::from_layers`.
+/// CLI-аргументы. Phase 8 Block B: `profiles: Vec<String>` для multi-conn —
+/// `pgtop prod staging local` открывает 3 подключения, переключение
+/// `Alt+1`/`Alt+2`/`Alt+3`.
 #[derive(Debug, Parser)]
 #[command(
     name = "pgtop",
     about = "Postgres activity TUI monitor",
     long_about = "TUI monitor for PostgreSQL.\n\
                   Config: ~/.config/pgtop/config.toml (see config.example.toml in repo).\n\
-                  Layering: CLI flags > DATABASE_URL env > profile > defaults."
+                  Layering: CLI flags > DATABASE_URL env > profile > defaults.\n\
+                  Multi-connection: pgtop prof1 prof2 ... — Alt+N to switch."
 )]
 struct Cli {
-    /// Profile name from config. Falls back to default_profile.
-    profile: Option<String>,
+    /// Profile name(s) from config. Multiple profiles open multi-connection
+    /// session, switchable via Alt+1/Alt+2/...
+    profiles: Vec<String>,
 
     /// Override DSN. Takes precedence over env and profile.
     #[arg(long)]
@@ -57,183 +62,157 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
 
-    // Phase 7: загрузить TOML-конфиг и свести все layer'ы (defaults → file
-    // → DATABASE_URL env → CLI) в финальный Resolved.
+    // Phase 7: загрузить TOML-конфиг.
     let config = config::load()?;
-    let resolved = config::Resolved::from_layers(
-        &config,
-        cli.profile.as_deref(),
-        cli.dsn.as_deref(),
-        cli.allow_actions,
-        cli.read_only,
-    )?;
 
-    // Tracing → файл, не stdout/stderr (TUI владеет терминалом). Guard держим
-    // в main до конца — при дропе non-blocking writer flush'нет буфер. Без
-    // удержания guard'а строки могут потеряться, если процесс резко выйдет.
+    // Phase 8 Block B: resolve по N профилям (или single default если
+    // `cli.profiles` пуст). Каждый получает свои read_only/actions_allowed
+    // и DSN с layered'ом CLI > env > profile > defaults.
+    let resolveds: Vec<Resolved> = if cli.profiles.is_empty() {
+        vec![Resolved::from_layers(
+            &config,
+            None,
+            cli.dsn.as_deref(),
+            cli.allow_actions,
+            cli.read_only,
+        )?]
+    } else {
+        cli.profiles
+            .iter()
+            .map(|p| {
+                Resolved::from_layers(
+                    &config,
+                    Some(p),
+                    cli.dsn.as_deref(),
+                    cli.allow_actions,
+                    cli.read_only,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+
     let _log_guard = init_audit_log()?;
     tracing::info!(
-        profile = ?resolved.profile_name,
-        actions_allowed = resolved.actions_allowed,
-        read_only = resolved.read_only,
+        profiles = ?resolveds.iter().filter_map(|r| r.profile_name.as_deref()).collect::<Vec<_>>(),
+        connections = resolveds.len(),
         "pgtop starting"
     );
 
-    let dsn = resolved.dsn.clone();
-    // Каждый collector получает свой connection через отдельный `db::connect`.
-    // tokio_postgres::Client не impl Clone (хотя внутри Arc'нут — public API
-    // не экспонирует), и совместное использование через `Arc<Client>` тоже
-    // сериализовало бы запросы через единственный driver. Параллельные
-    // соединения дёшевы (Postgres легко держит десятки) и дают true-параллелизм.
-    let client_activity = db::connect(&dsn).await?;
-    let client_locks = db::connect(&dsn).await?;
-    let client_top_queries = db::connect(&dsn).await?;
-    let client_replication = db::connect(&dsn).await?;
-    let client_stats = db::connect(&dsn).await?;
-    // Action executor — отдельное соединение, не конкурирует с collector'ами.
-    // Запросы pg_cancel_backend/pg_terminate_backend сами по себе мгновенные,
-    // но если бы шли через общий driver, могли бы блочиться за collector'ами.
-    let client_actions = db::connect(&dsn).await?;
-
-    // watch::channel(initial) — latest-wins канал. Sender хранит ровно одно
-    // значение, при `send` оно заменяется; Receiver-ы видят новую версию через
-    // `.changed().await`. Идеально для мониторинга: UI'у нужен только свежий
-    // снапшот, история не интересует.
-    //
-    // Initial value — пустой Vec: до первого тика collector'а UI рисует пустую
-    // таблицу. Первый tick происходит сразу (interval так устроен), задержка
-    // до первого реального снапшота = одно сетевое RTT к БД.
-    let (activity_tx, activity_rx) = watch::channel::<Vec<Backend>>(Vec::new());
-    let (locks_tx, locks_rx) = watch::channel::<Vec<Lock>>(Vec::new());
-    let (top_queries_tx, top_queries_rx) =
-        watch::channel::<TopQueriesSnapshot>(TopQueriesSnapshot::Loading);
-    let (replication_tx, replication_rx) = watch::channel::<Vec<Replica>>(Vec::new());
-    // Stats — initial value: TPS=0, conns=0, cache_hit=100% (best guess).
-    let (stats_tx, stats_rx) = watch::channel::<Stats>(Stats {
-        tps: 0.0,
-        active_connections: 0,
-        cache_hit_pct: 100.0,
-    });
-
-    // Actions: mpsc для команд (multiple producers — main task посылает по
-    // мере хоткеев), watch для результата (latest-wins, UI читает последний).
-    let (action_tx, action_rx) = mpsc::unbounded_channel::<ActionCommand>();
-    let (action_result_tx, action_result_rx) = watch::channel::<Option<ActionResult>>(None);
-
-    // CancellationToken — shared cancel-флаг с нотификацией. clone() шарит
-    // underlying state (внутри Arc<...>); cancel с любого клона видят все.
-    // main держит оригинал, collector'ы — клоны; на shutdown main зовёт cancel,
-    // оба collector'а видят на ближайшей `.cancelled()` await-точке.
+    // Phase 8 Block B: shared mpsc fan-in. Все collector'ы и executor'ы
+    // публикуют через один update_tx; main имеет один update_rx. UpdateMessage
+    // несёт `conn_idx` для адресации правильного ConnectionState.
+    let (update_tx, update_rx) = mpsc::unbounded_channel::<UpdateMessage>();
     let cancel = CancellationToken::new();
 
-    let activity_handle = tokio::spawn(collectors::run_activity_collector(
-        client_activity,
-        activity_tx,
-        cancel.clone(),
-        resolved.intervals.activity,
-    ));
-    let locks_handle = tokio::spawn(collectors::run_locks_collector(
-        client_locks,
-        locks_tx,
-        cancel.clone(),
-        resolved.intervals.locks,
-    ));
-    let top_queries_handle = tokio::spawn(collectors::run_top_queries_collector(
-        client_top_queries,
-        top_queries_tx,
-        cancel.clone(),
-        resolved.intervals.top_queries,
-    ));
-    let replication_handle = tokio::spawn(collectors::run_replication_collector(
-        client_replication,
-        replication_tx,
-        cancel.clone(),
-        resolved.intervals.replication,
-    ));
-    let stats_handle = tokio::spawn(collectors::run_stats_collector(
-        client_stats,
-        stats_tx,
-        cancel.clone(),
-        resolved.intervals.stats,
-    ));
-    let action_handle = tokio::spawn(actions::run_action_executor(
-        client_actions,
-        action_rx,
-        action_result_tx,
-        cancel.clone(),
-    ));
+    // Per-connection: свой набор клиентов, action_tx, 6 spawn'нутых задач.
+    let mut connections: Vec<ConnectionState> = Vec::with_capacity(resolveds.len());
+    let mut action_txs: Vec<mpsc::UnboundedSender<ActionCommand>> =
+        Vec::with_capacity(resolveds.len());
+    let mut handles = Vec::new();
 
-    // Phase 8 block A: одно соединение пока, но архитектурно App ждёт Vec.
-    // Block B расширит до multi-profile через `pgtop [PROFILE...]` CLI.
-    let conn = ConnectionState::new(
-        resolved
+    for (idx, resolved) in resolveds.iter().enumerate() {
+        // Имя для UI: profile_name либо "default" для безпрофильного запуска.
+        let name = resolved
             .profile_name
             .clone()
-            .unwrap_or_else(|| "default".to_string()),
-        resolved.dsn.clone(),
-        resolved.read_only,
-        resolved.actions_allowed,
-        resolved.profile_name.clone(),
-    );
-    let mut app = App::new(vec![conn]);
-    app.theme = resolved.theme;
+            .unwrap_or_else(|| "default".to_string());
+
+        connections.push(ConnectionState::new(
+            name,
+            resolved.dsn.clone(),
+            resolved.read_only,
+            resolved.actions_allowed,
+            resolved.profile_name.clone(),
+        ));
+
+        // 6 connections к Postgres на каждый ConnectionState — true parallelism.
+        let dsn = &resolved.dsn;
+        let client_activity = db::connect(dsn).await?;
+        let client_locks = db::connect(dsn).await?;
+        let client_top_queries = db::connect(dsn).await?;
+        let client_replication = db::connect(dsn).await?;
+        let client_stats = db::connect(dsn).await?;
+        let client_actions = db::connect(dsn).await?;
+
+        let intervals = &resolved.intervals;
+        handles.push(tokio::spawn(collectors::run_activity_collector(
+            client_activity,
+            update_tx.clone(),
+            idx,
+            cancel.clone(),
+            intervals.activity,
+        )));
+        handles.push(tokio::spawn(collectors::run_locks_collector(
+            client_locks,
+            update_tx.clone(),
+            idx,
+            cancel.clone(),
+            intervals.locks,
+        )));
+        handles.push(tokio::spawn(collectors::run_top_queries_collector(
+            client_top_queries,
+            update_tx.clone(),
+            idx,
+            cancel.clone(),
+            intervals.top_queries,
+        )));
+        handles.push(tokio::spawn(collectors::run_replication_collector(
+            client_replication,
+            update_tx.clone(),
+            idx,
+            cancel.clone(),
+            intervals.replication,
+        )));
+        handles.push(tokio::spawn(collectors::run_stats_collector(
+            client_stats,
+            update_tx.clone(),
+            idx,
+            cancel.clone(),
+            intervals.stats,
+        )));
+
+        // Per-conn action channel: команды от main → executor.
+        let (action_tx, action_rx) = mpsc::unbounded_channel::<ActionCommand>();
+        handles.push(tokio::spawn(actions::run_action_executor(
+            client_actions,
+            action_rx,
+            update_tx.clone(),
+            idx,
+            cancel.clone(),
+        )));
+        action_txs.push(action_tx);
+    }
+
+    // Дропаем оригинал update_tx — у нас только клоны в spawn'нутых задачах.
+    // Когда все задачи завершатся (cancel'ом), все клоны дропнутся → receiver
+    // увидит None. Без этого drop'а receiver не закроется даже после shutdown'а.
+    drop(update_tx);
+
+    let mut app = App::new(connections);
+    app.theme = resolveds[0].theme;
     let mut term = ui::TerminalGuard::new()?;
-    let loop_result = run_event_loop(
-        term.terminal(),
-        &mut app,
-        activity_rx,
-        locks_rx,
-        top_queries_rx,
-        replication_rx,
-        stats_rx,
-        action_tx,
-        action_result_rx,
-    )
-    .await;
+    let loop_result = run_event_loop(term.terminal(), &mut app, update_rx, action_txs).await;
 
-    // Восстанавливаем терминал ДО shutdown'а collector'ов: иначе пользователь
-    // видит замороженный кадр пока мы ждём завершение фоновых тасок (~до 1с).
     drop(term);
-
-    // Сигнал всем collector'ам. Cancel идемпотентен и идёт через клон токена.
     cancel.cancel();
 
-    // Ждём все handle'ы. `tokio::join!` завершается, когда **все** future'ы
-    // готовы. `let _ =` глушит JoinError'ы от потенциальной паники в таске.
-    let _ = tokio::join!(
-        activity_handle,
-        locks_handle,
-        top_queries_handle,
-        replication_handle,
-        stats_handle,
-        action_handle,
-    );
+    // Ждём все handle'ы — может быть много (6N). futures::future::join_all для
+    // динамической Vec'и handle'ов; `let _ =` глушит JoinError'ы.
+    let _ = futures::future::join_all(handles).await;
 
     loop_result
 }
 
 /// Async event loop: render → ждём первое событие → реагируем → повторяем.
 ///
-/// Три ветки `select!`:
-/// - `events.next()` — клавиатура, ресайз, мышь.
-/// - `data_rx.changed()` — collector прислал свежий snapshot.
-/// - `signal::ctrl_c()` — SIGINT.
-///
-/// Все cancel-safe (см. tokio-доку для каждого). Render вверху loop'а
-/// перерисовывает кадр по событию любого типа: на любую клавишу или новый
-/// snapshot UI обновляется сразу. Никаких 60fps-tick'ов: render строго по
-/// причине, ratatui-diff делает no-op-кадры дешёвыми.
-#[allow(clippy::too_many_arguments)] // 7 channels + terminal + app — refactor in Phase 7
+/// Phase 8 Block B: каналы упростились — один `update_rx` ловит сообщения
+/// от ВСЕХ collector'ов и executor'ов всех соединений. `action_txs` — Vec
+/// per-conn, индексируется `app.active`.
 async fn run_event_loop(
     terminal: &mut ui::Tui,
     app: &mut App,
-    mut activity_rx: watch::Receiver<Vec<Backend>>,
-    mut locks_rx: watch::Receiver<Vec<Lock>>,
-    mut top_queries_rx: watch::Receiver<TopQueriesSnapshot>,
-    mut replication_rx: watch::Receiver<Vec<Replica>>,
-    mut stats_rx: watch::Receiver<Stats>,
-    action_tx: mpsc::UnboundedSender<ActionCommand>,
-    mut action_result_rx: watch::Receiver<Option<ActionResult>>,
+    mut update_rx: mpsc::UnboundedReceiver<UpdateMessage>,
+    action_txs: Vec<mpsc::UnboundedSender<ActionCommand>>,
 ) -> Result<()> {
     let mut events = EventStream::new();
 
@@ -246,16 +225,24 @@ async fn run_event_loop(
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        // Универсальный Ctrl+C перед mode-dispatch'ем: в raw
-                        // mode терминальный драйвер обычно НЕ транслирует
-                        // Ctrl+C в SIGINT (флаг ISIG снят). Поэтому
-                        // `tokio::signal::ctrl_c()` ниже сработает только
-                        // от внешнего `kill -INT`, а от клавиатуры —
-                        // приходит как `Char('c') + CONTROL`. Ловим явно.
+                        // Универсальный Ctrl+C перед mode-dispatch'ем.
                         if key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                         {
                             return Ok(());
+                        }
+
+                        // Phase 8 Block B: универсальный Alt+digit — переключение
+                        // активного соединения. Идёт ДО mode-dispatch'а, чтобы
+                        // работало даже из Detail/Filter/Confirm — переключение
+                        // соединения сбрасывает Mode в Normal (см. set_active).
+                        if key.modifiers.contains(KeyModifiers::ALT)
+                            && let KeyCode::Char(c) = key.code
+                            && let Some(d) = c.to_digit(10)
+                        {
+                            let idx = (d as usize).saturating_sub(1);
+                            app.set_active(idx);
+                            continue;
                         }
 
                         // Mode-based dispatch: каждый режим имеет свой keymap.
@@ -322,10 +309,11 @@ async fn run_event_loop(
                             Mode::ConfirmCancel(pid) => match key.code {
                                 KeyCode::Enter => {
                                     let pid = *pid;
-                                    // try_send / non-blocking: event-loop не
-                                    // ждёт executor'а, результат прилетит
-                                    // через action_result_rx.changed().
-                                    let _ = action_tx
+                                    let active = app.active;
+                                    // Команда уходит executor'у активного
+                                    // соединения; результат прилетит через
+                                    // shared update_rx с conn_idx.
+                                    let _ = action_txs[active]
                                         .send(ActionCommand::Cancel { pid });
                                     app.close_modal();
                                 }
@@ -333,21 +321,15 @@ async fn run_event_loop(
                                 _ => {}
                             },
                             Mode::ConfirmTerminate(_, _) => match key.code {
-                                // Esc — abort всегда. Enter — отправить только
-                                // если text == "yes" (проверяет
-                                // try_confirm_terminate). Иначе модалка
-                                // остаётся открытой — anti-fool design.
                                 KeyCode::Esc => app.close_modal(),
                                 KeyCode::Enter => {
+                                    let active = app.active;
                                     if let Some(pid) = app.try_confirm_terminate() {
-                                        let _ = action_tx
+                                        let _ = action_txs[active]
                                             .send(ActionCommand::Terminate { pid });
                                     }
                                 }
                                 KeyCode::Backspace => app.terminate_input_backspace(),
-                                // Любые символы (включая `q`, `K`, цифры) —
-                                // часть набора подтверждения. Esc и Enter
-                                // выловлены выше, поэтому здесь они не помешают.
                                 KeyCode::Char(c) => app.terminate_input_push(c),
                                 _ => {}
                             },
@@ -359,75 +341,50 @@ async fn run_event_loop(
                 }
             }
 
-            // Activity snapshot.
-            res = activity_rx.changed() => {
-                match res {
-                    Ok(()) => {
-                        // `borrow_and_update` отдаёт `Ref<Vec<...>>` и помечает
-                        // версию как видимую. Клонируем содержимое — `Ref`
-                        // нельзя держать через `.await`.
-                        let snapshot = activity_rx.borrow_and_update().clone();
-                        app.set_backends(snapshot);
+            // Phase 8 Block B: единая ветка mpsc fan-in. UpdateMessage
+            // адресует ConnectionState через `conn_idx`. Modal-cleanup
+            // (Detail/Confirm на исчезнувший pid) делается только если
+            // обновление пришло на активный коннект.
+            msg = update_rx.recv() => {
+                match msg {
+                    None => return Ok(()),  // все senders дропнуты
+                    Some(UpdateMessage::Activity { conn_idx, snapshot }) => {
+                        if let Some(conn) = app.connection_mut(conn_idx) {
+                            conn.set_backends(snapshot);
+                        }
+                        if conn_idx == app.active {
+                            app.maybe_close_dead_modal();
+                        }
                     }
-                    Err(_) => return Ok(()),
-                }
-            }
-
-            // Locks snapshot.
-            res = locks_rx.changed() => {
-                match res {
-                    Ok(()) => {
-                        let snapshot = locks_rx.borrow_and_update().clone();
-                        app.set_locks(snapshot);
+                    Some(UpdateMessage::Locks { conn_idx, snapshot }) => {
+                        if let Some(conn) = app.connection_mut(conn_idx) {
+                            conn.set_locks(snapshot);
+                        }
                     }
-                    Err(_) => return Ok(()),
-                }
-            }
-
-            // Top Queries snapshot.
-            res = top_queries_rx.changed() => {
-                match res {
-                    Ok(()) => {
-                        let snapshot = top_queries_rx.borrow_and_update().clone();
-                        app.set_top_queries(snapshot);
+                    Some(UpdateMessage::TopQueries { conn_idx, snapshot }) => {
+                        if let Some(conn) = app.connection_mut(conn_idx) {
+                            conn.set_top_queries(snapshot);
+                        }
                     }
-                    Err(_) => return Ok(()),
-                }
-            }
-
-            // Replication snapshot.
-            res = replication_rx.changed() => {
-                match res {
-                    Ok(()) => {
-                        let snapshot = replication_rx.borrow_and_update().clone();
-                        app.set_replication(snapshot);
+                    Some(UpdateMessage::Replication { conn_idx, snapshot }) => {
+                        if let Some(conn) = app.connection_mut(conn_idx) {
+                            conn.set_replication(snapshot);
+                        }
                     }
-                    Err(_) => return Ok(()),
-                }
-            }
-
-            // Stats snapshot — push в ring-буфер для sparkline'ов в шапке.
-            res = stats_rx.changed() => {
-                match res {
-                    Ok(()) => {
-                        // Stats — Copy, можно `*`-deref'ить из Ref без clone'а.
-                        let stats = *stats_rx.borrow_and_update();
-                        app.push_stats(stats);
+                    Some(UpdateMessage::Stats { conn_idx, snapshot }) => {
+                        if let Some(conn) = app.connection_mut(conn_idx) {
+                            conn.push_stats(snapshot);
+                        }
                     }
-                    Err(_) => return Ok(()),
-                }
-            }
-
-            // Action result от executor'а — обновить status-line.
-            res = action_result_rx.changed() => {
-                match res {
-                    Ok(()) => {
-                        let snapshot = action_result_rx.borrow_and_update().clone();
-                        if let Some(result) = snapshot {
+                    Some(UpdateMessage::ActionResult { conn_idx, result }) => {
+                        // last_action_result глобальный (один на App). Показываем
+                        // только результаты от активного соединения, чтобы не
+                        // путать «прислала команду на prod, ушёл на staging,
+                        // увидел результат с prod». Phase 8 Block C — per-conn.
+                        if conn_idx == app.active {
                             app.set_action_result(result);
                         }
                     }
-                    Err(_) => return Ok(()),
                 }
             }
 

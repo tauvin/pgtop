@@ -157,9 +157,9 @@ fn title_for(app: &App) -> String {
     }
 }
 
-/// `pgtop [· profile] [· RO]` — head-индикаторы режима запуска. Phase 8:
-/// читаем из активного соединения; multi-conn (Block B) добавит ещё индикатор
-/// текущего connection-index'а из Vec.
+/// `pgtop [· profile] [· RO] [· N/M]` — head-индикаторы. Phase 8 Block B:
+/// `· 1/3` показывается когда соединений больше одного — индекс активного
+/// и общее число, чтобы пользователь видел куда переключился по Alt+N.
 fn build_prefix(app: &App) -> String {
     let mut prefix = String::from("pgtop");
     let conn = app.active();
@@ -169,6 +169,10 @@ fn build_prefix(app: &App) -> String {
     }
     if conn.read_only {
         prefix.push_str(" · RO");
+    }
+    let total = app.connections.len();
+    if total > 1 {
+        prefix.push_str(&format!(" · {}/{}", app.active + 1, total));
     }
     prefix
 }

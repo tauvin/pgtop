@@ -14,9 +14,11 @@
 //! файл попадают timestamp + команда + результат.
 
 use chrono::{DateTime, Utc};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio_postgres::Client;
 use tokio_util::sync::CancellationToken;
+
+use crate::messages::UpdateMessage;
 
 /// Команда для executor'а.
 #[derive(Debug, Clone)]
@@ -60,22 +62,23 @@ pub struct ActionResult {
     pub at: DateTime<Utc>,
 }
 
-/// Запустить executor в spawned-таске.
+/// Запустить executor в spawned-таске. Phase 8 Block B: результат публикуется
+/// через shared `mpsc::UnboundedSender<UpdateMessage>` с `conn_idx` —
+/// единая mpsc fan-in архитектура для всех collector'ов и executor'ов.
 pub async fn run_action_executor(
     client: Client,
     mut commands_rx: mpsc::UnboundedReceiver<ActionCommand>,
-    result_tx: watch::Sender<Option<ActionResult>>,
+    update_tx: mpsc::UnboundedSender<UpdateMessage>,
+    conn_idx: usize,
     cancel: CancellationToken,
 ) {
     loop {
-        // Ждём либо команду, либо cancellation. `biased;` гарантирует,
-        // что cancel проверится первым (см. collectors/* для подробностей).
         let cmd = tokio::select! {
             biased;
             _ = cancel.cancelled() => break,
             c = commands_rx.recv() => match c {
                 Some(c) => c,
-                None => break,  // все Sender'ы закрыты — выходим
+                None => break,
             },
         };
 
@@ -88,9 +91,10 @@ pub async fn run_action_executor(
             at: Utc::now(),
         };
 
-        // Если все Receiver'ы дропнуты (UI ушёл) — нам тоже пора. is_err()
-        // не считаем ошибкой; `let _ =` глушит warning об unused Result.
-        if result_tx.send(Some(result)).is_err() {
+        if update_tx
+            .send(UpdateMessage::ActionResult { conn_idx, result })
+            .is_err()
+        {
             break;
         }
     }

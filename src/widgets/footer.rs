@@ -12,8 +12,9 @@ use ratatui::{
 use crate::app::{App, Mode, Tab};
 
 pub fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let multi_conn = app.connections.len() > 1;
     let line = match &app.mode {
-        Mode::Normal => normal_hints(app.current_tab, app.active().actions_allowed),
+        Mode::Normal => normal_hints(app.current_tab, app.active().actions_allowed, multi_conn),
         Mode::Detail(_) => Line::from(vec![
             Span::raw(" "),
             "Esc".bold(),
@@ -52,8 +53,9 @@ pub fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Хинты для Normal mode зависят от current_tab. ↑↓-нав работает везде
 /// (select_previous/next сами no-op для табов без list); Activity получает
-/// расширенный набор (Enter/filter/sort).
-fn normal_hints(tab: Tab, actions_allowed: bool) -> Line<'static> {
+/// расширенный набор (Enter/filter/sort). Phase 8 Block B: при multi-conn
+/// показываем Alt+N подсказку для переключения соединений.
+fn normal_hints(tab: Tab, actions_allowed: bool, multi_conn: bool) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = vec![
         Span::raw(" "),
         "q".bold(),
@@ -63,6 +65,10 @@ fn normal_hints(tab: Tab, actions_allowed: bool) -> Line<'static> {
         "↑↓".bold(),
         Span::raw(" move"),
     ];
+
+    if multi_conn {
+        spans.extend([Span::raw("  ·  "), "Alt+N".bold(), Span::raw(" conn")]);
+    }
 
     if tab == Tab::Activity {
         spans.extend([

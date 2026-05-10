@@ -36,6 +36,10 @@ pub struct Config {
     /// Poll intervals per collector.
     #[serde(default)]
     pub intervals: IntervalsConfig,
+
+    /// Active backends running longer than this are highlighted in red and
+    /// counted in the Activity tab title. Default 30 seconds.
+    pub slow_query_threshold_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -128,6 +132,7 @@ pub struct Resolved {
     pub profile_name: Option<String>,
     pub theme: Theme,
     pub intervals: Intervals,
+    pub slow_query_threshold: Duration,
 }
 
 /// Path to the config file (`$XDG_CONFIG_HOME/pgtop/config.toml`).
@@ -198,6 +203,9 @@ impl Resolved {
 
         let intervals = Intervals::from_config(&config.intervals);
 
+        let slow_query_threshold =
+            Duration::from_secs(config.slow_query_threshold_secs.unwrap_or(30));
+
         Ok(Self {
             dsn,
             actions_allowed,
@@ -205,6 +213,7 @@ impl Resolved {
             profile_name,
             theme,
             intervals,
+            slow_query_threshold,
         })
     }
 }

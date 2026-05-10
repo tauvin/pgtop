@@ -214,6 +214,9 @@ pub struct ConnectionState {
     pub read_only: bool,
     pub actions_allowed: bool,
     pub profile_name: Option<String>,
+    /// Active backends running longer than this are highlighted as slow
+    /// and counted in the Activity tab title.
+    pub slow_query_threshold: std::time::Duration,
 
     /// Current health of the connection.
     pub status: ConnectionStatus,
@@ -262,6 +265,7 @@ impl ConnectionState {
         read_only: bool,
         actions_allowed: bool,
         profile_name: Option<String>,
+        slow_query_threshold: std::time::Duration,
     ) -> Self {
         Self {
             name,
@@ -269,6 +273,7 @@ impl ConnectionState {
             read_only,
             actions_allowed,
             profile_name,
+            slow_query_threshold,
             status: ConnectionStatus::default(),
             backends: Vec::new(),
             filtered: Vec::new(),
@@ -1065,7 +1070,14 @@ mod tests {
     }
 
     fn conn() -> ConnectionState {
-        ConnectionState::new("t".into(), "".into(), false, false, None)
+        ConnectionState::new(
+            "t".into(),
+            "".into(),
+            false,
+            false,
+            None,
+            std::time::Duration::from_secs(30),
+        )
     }
 
     #[test]

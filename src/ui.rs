@@ -14,8 +14,10 @@ use ratatui::{
     widgets::Block,
 };
 
+use chrono::Utc;
+
 use crate::{
-    app::{App, ConnectionStatus, Mode, Tab},
+    app::{App, ConnectionState, ConnectionStatus, Mode, Tab},
     db::TopQueriesSnapshot,
     views::{
         render_activity, render_databases, render_locks, render_replication, render_tables,
@@ -174,10 +176,16 @@ fn tab_suffix(app: &App) -> String {
         Tab::Activity => {
             let visible = conn.filtered.len();
             let total = conn.backends.len();
-            if visible == total {
+            let slow = count_slow(conn);
+            let base = if visible == total {
                 format!("{total} backends")
             } else {
                 format!("{visible}/{total} backends")
+            };
+            if slow > 0 {
+                format!("{base} · ⚠ {slow} slow")
+            } else {
+                base
             }
         }
         Tab::Locks => {
@@ -226,4 +234,19 @@ fn tab_suffix(app: &App) -> String {
             }
         }
     }
+}
+
+fn count_slow(conn: &ConnectionState) -> usize {
+    let now = Utc::now();
+    let threshold_secs = conn.slow_query_threshold.as_secs() as i64;
+    conn.backends
+        .iter()
+        .filter(|b| {
+            !b.is_self()
+                && b.state.as_deref() == Some("active")
+                && b.query_start
+                    .map(|s| (now - s).num_seconds() > threshold_secs)
+                    .unwrap_or(false)
+        })
+        .count()
 }

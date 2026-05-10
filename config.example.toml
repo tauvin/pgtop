@@ -16,6 +16,10 @@
 # CLI arg, falls back to DATABASE_URL env / DEFAULT_DSN.
 default_profile = "local"
 
+# Active backends running longer than this are highlighted in red+bold and
+# surfaced as "⚠ N slow" in the Activity tab title. Default: 30.
+slow_query_threshold_secs = 30
+
 [profiles.local]
 # DSN can be URL form (postgres://user:pass@host:port/db) or libpq key=value
 # (host=... user=... password='...' dbname=...). Latter is friendlier with

@@ -31,9 +31,10 @@ pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     ];
 
     let now = Utc::now();
+    let slow_threshold_secs = conn.slow_query_threshold.as_secs() as i64;
     let rows: Vec<Row<'static>> = conn
         .visible_backends()
-        .map(|b| backend_to_row(b, now, theme))
+        .map(|b| backend_to_row(b, now, theme, slow_threshold_secs))
         .collect();
 
     let table = Table::new(rows, widths)
@@ -67,7 +68,12 @@ fn build_header_row(sort: Sort) -> Row<'static> {
     Row::new(cells).style(Style::new().add_modifier(Modifier::BOLD))
 }
 
-fn backend_to_row(b: &Backend, now: DateTime<Utc>, theme: Theme) -> Row<'static> {
+fn backend_to_row(
+    b: &Backend,
+    now: DateTime<Utc>,
+    theme: Theme,
+    slow_threshold_secs: i64,
+) -> Row<'static> {
     Row::new([
         b.pid.to_string(),
         b.usename.clone().unwrap_or_else(em_dash),
@@ -76,12 +82,10 @@ fn backend_to_row(b: &Backend, now: DateTime<Utc>, theme: Theme) -> Row<'static>
         format_duration(b.query_start, now),
         format_query(b.query.as_deref()),
     ])
-    .style(row_style(b, now, theme))
+    .style(row_style(b, now, theme, slow_threshold_secs))
 }
 
-fn row_style(b: &Backend, now: DateTime<Utc>, theme: Theme) -> Style {
-    const LONG_QUERY_THRESHOLD_SECS: i64 = 10;
-
+fn row_style(b: &Backend, now: DateTime<Utc>, theme: Theme, slow_threshold_secs: i64) -> Style {
     if b.is_self() {
         return Style::new().fg(theme.muted);
     }
@@ -89,12 +93,12 @@ fn row_style(b: &Backend, now: DateTime<Utc>, theme: Theme) -> Style {
     let state = b.state.as_deref();
 
     if state == Some("active") {
-        let long = b
+        let slow = b
             .query_start
-            .map(|s| (now - s).num_seconds() > LONG_QUERY_THRESHOLD_SECS)
+            .map(|s| (now - s).num_seconds() > slow_threshold_secs)
             .unwrap_or(false);
-        return if long {
-            Style::new().fg(theme.danger)
+        return if slow {
+            Style::new().fg(theme.danger).add_modifier(Modifier::BOLD)
         } else {
             Style::new().fg(theme.success)
         };

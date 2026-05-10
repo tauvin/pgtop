@@ -112,6 +112,7 @@ async fn main() -> Result<()> {
             resolved.read_only,
             resolved.actions_allowed,
             resolved.profile_name.clone(),
+            resolved.slow_query_threshold,
         ));
 
         let dsn = resolved.dsn.clone();

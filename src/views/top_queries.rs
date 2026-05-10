@@ -16,15 +16,15 @@ use crate::{
 };
 
 pub fn render_top_queries(frame: &mut Frame, area: Rect, app: &mut App) {
-    // Disjoint field borrows: `&app.top_queries` (immut) и
-    // `&mut app.top_queries_table_state` (mut) — разные поля, компилятор
-    // пропустит. Передавать целиком `&mut app` в render_available нельзя:
-    // там бы уже жил immutable borrow от match'а.
-    match &app.top_queries {
+    // Phase 8: данные per-connection. Берём конкретный &mut ConnectionState
+    // первым — на нём disjoint field borrows работают (match на immut поле +
+    // mut на другое поле — компилятор пропускает).
+    let conn = app.active_mut();
+    match &conn.top_queries {
         TopQueriesSnapshot::Loading => render_loading(frame, area),
         TopQueriesSnapshot::ExtensionMissing => render_extension_missing(frame, area),
         TopQueriesSnapshot::Available(queries) => {
-            render_available(frame, area, queries, &mut app.top_queries_table_state);
+            render_available(frame, area, queries, &mut conn.top_queries_table_state);
         }
     }
 }

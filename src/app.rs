@@ -1,9 +1,9 @@
 //! Состояние приложения, которое переживает между кадрами.
 //!
-//! Каждый кадр UI получает `&mut App`. Обновления данных от collector'а заходят
-//! в `App::set_backends`. На Phase 4 block C добавилось поле `filter`
-//! (regex-фильтр по тексту query) и `filtered` (предвычисленные индексы
-//! видимых backend'ов).
+//! Phase 8 block A: per-connection state переехал в `ConnectionState`.
+//! `App` хранит `Vec<ConnectionState>` + активный индекс. Глобальные
+//! UI-вещи (mode, tab, theme, last_action_result) остаются на App.
+//! Single-conn режим = `connections.len() == 1`, поведение прежнее.
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -19,7 +19,7 @@ use crate::db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
 use crate::theme::Theme;
 
 /// Активный таб TUI. Каждый таб — отдельный «view» с собственными данными
-/// и хоткеями. `index()` соответствует позиции в `Tab::all()` (для tab bar).
+/// и хоткеями.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Activity,
@@ -56,22 +56,10 @@ impl Tab {
     }
 }
 
-/// Модальные состояния UI.
-///
-/// `Detail(pid)` хранит **pid**, а не индекс: список перетасуется, индекс
-/// «уплывёт», а pid стабилен. Если pid исчезнет, `set_backends` авто-возвращает
-/// в `Normal`.
-///
-/// `Filter` — режим редактирования фильтра. Сам текст и regex живут в
-/// `App.filter`, чтобы переживать выход из режима (Enter коммитит, Esc отменяет).
-///
-/// `ConfirmCancel(pid)` — модалка подтверждения cancel-action на выбранном
-/// backend'е. Enter → отправить команду, Esc → отменить.
-///
-/// `ConfirmTerminate(pid, String)` — destructive terminate. String хранит
-/// набранный пользователем текст; команда отправляется только если `== "yes"`.
-/// Это анти-fool design: невозможно случайно подтвердить, нужно явно
-/// набрать три буквы.
+/// Модальные состояния UI. Глобальные (один Mode на всё приложение, не
+/// per-connection) — модалка открыта поверх всего, какое бы соединение ни
+/// было активно. При переключении соединения Mode сбрасывается в Normal
+/// (см. `App::set_active`).
 #[derive(Debug, Clone)]
 pub enum Mode {
     Normal,
@@ -81,12 +69,6 @@ pub enum Mode {
     ConfirmTerminate(i32, String),
 }
 
-/// Состояние regex-фильтра. Применяется к полю `query` каждого backend'а.
-///
-/// `input` хранит сырой текст (управляется `tui-input`'ом — поддерживает
-/// курсор, backspace, ctrl+u и т.д.). `regex` — последняя успешно
-/// скомпилированная версия. Если входной текст невалидный, `regex` = None
-/// и фильтр временно не применяется (как «поиск отключён» — показываем всё).
 #[derive(Default)]
 pub struct Filter {
     pub input: Input,
@@ -94,8 +76,6 @@ pub struct Filter {
 }
 
 impl Filter {
-    /// `true`, если backend проходит фильтр. Без regex — все проходят.
-    /// С regex — проверяем по тексту query (NULL query = не проходит).
     pub fn matches(&self, b: &Backend) -> bool {
         let Some(re) = &self.regex else {
             return true;
@@ -103,29 +83,21 @@ impl Filter {
         b.query.as_deref().is_some_and(|q| re.is_match(q))
     }
 
-    /// Перекомпилировать regex из текущего `input.value()`.
-    /// Пустая строка → нет фильтра. Невалидный regex → `None` (тоже без фильтра,
-    /// UI показывает индикатор «invalid»).
     pub fn rebuild_regex(&mut self) {
         let value = self.input.value();
         self.regex = if value.is_empty() {
             None
         } else {
-            // Case-insensitive — типичная UX для interactive search.
-            // Пользователь может явно опт-аутнуть префиксом `(?-i)`.
             RegexBuilder::new(value).case_insensitive(true).build().ok()
         };
     }
 
-    /// Полностью очистить: input + regex. Используется в Esc-cancel сценарии.
     pub fn clear(&mut self) {
         self.input.reset();
         self.regex = None;
     }
 }
 
-/// Колонка таблицы для сортировки. Один enum-вариант на колонку — порядок
-/// `next()` совпадает с порядком колонок в UI слева направо.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortBy {
     Pid,
@@ -137,8 +109,6 @@ pub enum SortBy {
 }
 
 impl SortBy {
-    /// Циклический shift на следующую колонку (Query → Pid). Используется
-    /// для хоткея `s`.
     pub fn next(self) -> Self {
         match self {
             Self::Pid => Self::User,
@@ -150,7 +120,6 @@ impl SortBy {
         }
     }
 
-    /// Заголовок колонки в таблице.
     pub fn label(self) -> &'static str {
         match self {
             Self::Pid => "pid",
@@ -177,7 +146,6 @@ impl SortDirection {
         }
     }
 
-    /// Юникод-стрелка для индикатора в header'е.
     pub fn arrow(self) -> &'static str {
         match self {
             Self::Asc => "▲",
@@ -201,69 +169,61 @@ impl Default for Sort {
     }
 }
 
-/// Корневое состояние приложения.
-pub struct App {
-    /// Полный snapshot pg_stat_activity от collector'а.
+/// Состояние одного подключения — собственные данные всех табов + identity
+/// (имя, DSN, profile_name, read_only). Phase 8: App хранит вектор таких
+/// состояний, переключение между ними — Alt+N (Block B).
+#[allow(dead_code)] // `name` и `dsn` подключатся в Block B (UI-индикатор + reconnect-логика).
+pub struct ConnectionState {
+    /// Имя для display в title/footer. Обычно совпадает с profile_name;
+    /// для ad-hoc DSN — может быть просто "default" или host-derived.
+    pub name: String,
+    pub dsn: String,
+    pub read_only: bool,
+    pub actions_allowed: bool,
+    pub profile_name: Option<String>,
+
+    // Activity tab
     pub backends: Vec<Backend>,
-
-    /// Индексы backend'ов, прошедших фильтр и отсортированных по `sort`.
-    /// `TableState.selected` индексирует этот вектор (а не `backends`).
-    /// Пересчитывается в `recompute_filtered` после смены данных, фильтра
-    /// или сортировки.
     pub filtered: Vec<usize>,
-
     pub table_state: TableState,
+    pub filter: Filter,
+    pub sort: Sort,
 
-    // --- Locks tab data (Phase 5 block B) ---
+    // Locks tab
     pub locks: Vec<Lock>,
     pub locks_table_state: TableState,
 
-    // --- Top Queries tab data (Phase 5 block C) ---
+    // Top Queries tab
     pub top_queries: TopQueriesSnapshot,
     pub top_queries_table_state: TableState,
 
-    // --- Replication tab data (Phase 5 block D) ---
+    // Replication tab
     pub replication: Vec<Replica>,
     pub replication_table_state: TableState,
 
-    // --- Header sparklines (Phase 5 block E) ---
+    // Header sparklines
     pub stats: StatsHistory,
-
-    // --- Глобальное состояние ---
-    pub mode: Mode,
-    pub filter: Filter,
-    pub sort: Sort,
-    pub current_tab: Tab,
-
-    /// Phase 6: разрешены ли cancel/terminate-actions. Финальное resolved-значение
-    /// после layered config loading'а — учитывает CLI `--allow-actions`,
-    /// CLI `--read-only`, `profile.read_only`. См. `config::Resolved::from_layers`.
-    pub actions_allowed: bool,
-
-    /// Последний результат action'а от executor'а — отображается в status-line
-    /// (filter-line area). `None` пока ни одной команды не было; иначе самый
-    /// свежий результат.
-    pub last_action_result: Option<ActionResult>,
-
-    /// Phase 7: имя активного профиля для отображения в title-bar. `None` —
-    /// если запущено без профиля (только CLI/env).
-    pub profile_name: Option<String>,
-
-    /// Phase 7: read-only mode для UI-индикации. Сама блокировка actions'ов
-    /// уже учтена в `actions_allowed`; это поле — только для отображения.
-    pub read_only: bool,
-
-    /// Phase 7: семантические цвета (Theme — Copy, cheap для копий
-    /// при передаче в render-функции).
-    pub theme: Theme,
 }
 
-impl App {
-    pub fn new(actions_allowed: bool) -> Self {
+impl ConnectionState {
+    pub fn new(
+        name: String,
+        dsn: String,
+        read_only: bool,
+        actions_allowed: bool,
+        profile_name: Option<String>,
+    ) -> Self {
         Self {
+            name,
+            dsn,
+            read_only,
+            actions_allowed,
+            profile_name,
             backends: Vec::new(),
             filtered: Vec::new(),
             table_state: TableState::default(),
+            filter: Filter::default(),
+            sort: Sort::default(),
             locks: Vec::new(),
             locks_table_state: TableState::default(),
             top_queries: TopQueriesSnapshot::Loading,
@@ -271,23 +231,12 @@ impl App {
             replication: Vec::new(),
             replication_table_state: TableState::default(),
             stats: StatsHistory::default(),
-            mode: Mode::Normal,
-            filter: Filter::default(),
-            sort: Sort::default(),
-            current_tab: Tab::Activity,
-            actions_allowed,
-            last_action_result: None,
-            profile_name: None,
-            read_only: false,
-            theme: Theme::default(),
         }
     }
 
     /// Пересобрать `filtered`-индексы (фильтр + сортировка) и поправить
-    /// selection под новый размер. Вызывается при любом изменении
-    /// `backends`, `filter` или `sort`.
+    /// selection под новый размер.
     fn recompute_filtered(&mut self) {
-        // Шаг 1: фильтрация.
         self.filtered = self
             .backends
             .iter()
@@ -296,11 +245,6 @@ impl App {
             .map(|(i, _)| i)
             .collect();
 
-        // Шаг 2: сортировка по выбранной колонке + направлению.
-        // `now` фиксируем один раз на проход — иначе компаратор может
-        // сравнивать по дрейфующему «сейчас» в одной сортировке.
-        // `&self.backends` (immutable) и `&mut self.filtered` — disjoint field
-        // borrows; компилятор пропустит благодаря borrow splitting'у.
         let now = Utc::now();
         let by = self.sort.by;
         let dir = self.sort.direction;
@@ -314,7 +258,6 @@ impl App {
             }
         });
 
-        // Шаг 3: clamp selection под новую длину.
         let len = self.filtered.len();
         match self.table_state.selected() {
             _ if len == 0 => self.table_state.select(None),
@@ -324,27 +267,36 @@ impl App {
         }
     }
 
-    /// Обновить snapshot. Заодно пересчитываем filtered и закрываем модалку
-    /// (Detail/ConfirmCancel), если её pid исчез из снапшота.
     pub fn set_backends(&mut self, backends: Vec<Backend>) {
         self.backends = backends;
         self.recompute_filtered();
-
-        // Все pid-bound модалки авто-закрываются на смерть выбранного pid'а:
-        // Detail/ConfirmCancel/ConfirmTerminate — общая логика.
-        let active_pid = match &self.mode {
-            Mode::Detail(pid) | Mode::ConfirmCancel(pid) => Some(*pid),
-            Mode::ConfirmTerminate(pid, _) => Some(*pid),
-            _ => None,
-        };
-        if let Some(pid) = active_pid
-            && !self.backends.iter().any(|b| b.pid == pid)
-        {
-            self.mode = Mode::Normal;
-        }
     }
 
-    /// Получить видимый (после фильтра) backend по индексу из `filtered`.
+    pub fn set_locks(&mut self, locks: Vec<Lock>) {
+        self.locks = locks;
+        let len = self.locks.len();
+        clamp_table_state(&mut self.locks_table_state, len);
+    }
+
+    pub fn set_top_queries(&mut self, snapshot: TopQueriesSnapshot) {
+        self.top_queries = snapshot;
+        let len = match &self.top_queries {
+            TopQueriesSnapshot::Available(queries) => queries.len(),
+            _ => 0,
+        };
+        clamp_table_state(&mut self.top_queries_table_state, len);
+    }
+
+    pub fn set_replication(&mut self, replication: Vec<Replica>) {
+        self.replication = replication;
+        let len = self.replication.len();
+        clamp_table_state(&mut self.replication_table_state, len);
+    }
+
+    pub fn push_stats(&mut self, stats: Stats) {
+        self.stats.push(stats);
+    }
+
     pub fn visible_backend(&self, idx: usize) -> Option<&Backend> {
         self.filtered
             .get(idx)
@@ -352,17 +304,14 @@ impl App {
             .and_then(|i| self.backends.get(i))
     }
 
-    /// Итератор по видимым backend'ам — для render_table.
-    /// `+ '_` — лайфтайм возвращаемого `impl Iterator` привязан к `&self`.
     pub fn visible_backends(&self) -> impl Iterator<Item = &Backend> + '_ {
         self.filtered.iter().filter_map(|&i| self.backends.get(i))
     }
 
-    /// Сдвиг выделения вверх. Диспатчится на TableState текущего таба
-    /// (Activity → app.table_state, Locks → app.locks_table_state). На
-    /// табах без list-content (TopQueries/Replication пока) — no-op.
-    pub fn select_previous(&mut self) {
-        match self.current_tab {
+    /// Сдвиг выделения вверх. Принимает `tab` потому что разные табы используют
+    /// разные `TableState` поля.
+    pub fn select_previous(&mut self, tab: Tab) {
+        match tab {
             Tab::Activity => {
                 if self.filtered.is_empty() {
                     return;
@@ -409,9 +358,8 @@ impl App {
         }
     }
 
-    /// Сдвиг выделения вниз. Структурно зеркальный `select_previous`.
-    pub fn select_next(&mut self) {
-        match self.current_tab {
+    pub fn select_next(&mut self, tab: Tab) {
+        match tab {
             Tab::Activity => {
                 if self.filtered.is_empty() {
                     return;
@@ -459,82 +407,185 @@ impl App {
         }
     }
 
-    /// Обновить snapshot блокировок. Selection клампится по тем же правилам,
-    /// что в `set_backends` (пусто → None; selected ≥ len → последняя; None +
-    /// данные → первая).
-    pub fn set_locks(&mut self, locks: Vec<Lock>) {
-        self.locks = locks;
-        let len = self.locks.len();
-        match self.locks_table_state.selected() {
-            _ if len == 0 => self.locks_table_state.select(None),
-            Some(i) if i >= len => self.locks_table_state.select(Some(len - 1)),
-            None => self.locks_table_state.select(Some(0)),
-            Some(_) => {}
-        }
+    pub fn cycle_sort_column(&mut self) {
+        self.sort.by = self.sort.by.next();
+        self.recompute_filtered();
     }
 
-    /// Обновить snapshot Top Queries. На non-Available состояниях
-    /// (Loading / ExtensionMissing) сбрасываем selection в None.
-    pub fn set_top_queries(&mut self, snapshot: TopQueriesSnapshot) {
-        self.top_queries = snapshot;
-        let len = match &self.top_queries {
-            TopQueriesSnapshot::Available(queries) => queries.len(),
-            _ => 0,
+    pub fn toggle_sort_direction(&mut self) {
+        self.sort.direction = self.sort.direction.flip();
+        self.recompute_filtered();
+    }
+
+    pub fn handle_filter_input(&mut self, key: KeyEvent) {
+        let Some(req) = key_to_request(key) else {
+            return;
         };
-        match self.top_queries_table_state.selected() {
-            _ if len == 0 => self.top_queries_table_state.select(None),
-            Some(i) if i >= len => self.top_queries_table_state.select(Some(len - 1)),
-            None => self.top_queries_table_state.select(Some(0)),
-            Some(_) => {}
+        if self.filter.input.handle(req).is_some() {
+            self.filter.rebuild_regex();
+            self.recompute_filtered();
         }
     }
 
-    /// Обновить snapshot Replication. Те же clamp-правила, что в `set_locks`.
+    pub fn clear_filter(&mut self) {
+        self.filter.clear();
+        self.recompute_filtered();
+    }
+}
+
+/// Корневое состояние приложения. Phase 8: данные per-connection живут в
+/// `connections[active]`. Глобальные UI-вещи (mode/tab/theme/result) на App.
+pub struct App {
+    pub connections: Vec<ConnectionState>,
+    /// Индекс активного соединения. Гарантирован валидным —
+    /// `set_active` clamps; конструктор требует non-empty Vec.
+    pub active: usize,
+
+    pub mode: Mode,
+    pub current_tab: Tab,
+    pub theme: Theme,
+    pub last_action_result: Option<ActionResult>,
+}
+
+impl App {
+    /// Требует non-empty `connections`. Panic если пустой — это invariant
+    /// уровня архитектуры, проверяется в main.rs до вызова.
+    pub fn new(connections: Vec<ConnectionState>) -> Self {
+        assert!(
+            !connections.is_empty(),
+            "App requires at least one connection"
+        );
+        Self {
+            connections,
+            active: 0,
+            mode: Mode::Normal,
+            current_tab: Tab::Activity,
+            theme: Theme::default(),
+            last_action_result: None,
+        }
+    }
+
+    pub fn active(&self) -> &ConnectionState {
+        &self.connections[self.active]
+    }
+
+    pub fn active_mut(&mut self) -> &mut ConnectionState {
+        &mut self.connections[self.active]
+    }
+
+    /// Получить connection по индексу — для adressing'а сообщений из
+    /// collector'ов конкретному соединению (Phase 8 Block B).
+    #[allow(dead_code)] // wired up in Block B
+    pub fn connection_mut(&mut self, idx: usize) -> Option<&mut ConnectionState> {
+        self.connections.get_mut(idx)
+    }
+
+    /// Set active connection by index. Out-of-bounds → no-op.
+    /// Сбрасывает Mode в Normal — модалки привязаны к конкретному соединению,
+    /// при переключении они теряют смысл.
+    #[allow(dead_code)] // wired up in Block B (Alt+N hotkeys)
+    pub fn set_active(&mut self, idx: usize) {
+        if idx < self.connections.len() && idx != self.active {
+            self.active = idx;
+            self.mode = Mode::Normal;
+        }
+    }
+
+    /// Set backends на активное соединение. Заодно проверяем, не исчез ли
+    /// pid из активной модалки (Detail/ConfirmCancel/ConfirmTerminate) —
+    /// если да, закрываем модалку.
+    pub fn set_backends(&mut self, backends: Vec<Backend>) {
+        self.active_mut().set_backends(backends);
+        self.maybe_close_dead_modal();
+    }
+
+    fn maybe_close_dead_modal(&mut self) {
+        let active_pid = match &self.mode {
+            Mode::Detail(pid) | Mode::ConfirmCancel(pid) => Some(*pid),
+            Mode::ConfirmTerminate(pid, _) => Some(*pid),
+            _ => None,
+        };
+        if let Some(pid) = active_pid
+            && !self.active().backends.iter().any(|b| b.pid == pid)
+        {
+            self.mode = Mode::Normal;
+        }
+    }
+
+    pub fn set_locks(&mut self, locks: Vec<Lock>) {
+        self.active_mut().set_locks(locks);
+    }
+
+    pub fn set_top_queries(&mut self, snapshot: TopQueriesSnapshot) {
+        self.active_mut().set_top_queries(snapshot);
+    }
+
     pub fn set_replication(&mut self, replication: Vec<Replica>) {
-        self.replication = replication;
-        let len = self.replication.len();
-        match self.replication_table_state.selected() {
-            _ if len == 0 => self.replication_table_state.select(None),
-            Some(i) if i >= len => self.replication_table_state.select(Some(len - 1)),
-            None => self.replication_table_state.select(Some(0)),
-            Some(_) => {}
-        }
+        self.active_mut().set_replication(replication);
     }
 
-    /// Запушить новые stats в ring-buffer'ы для sparkline'ов в шапке.
-    /// Также обновить `current` для текущего значения в подписи.
     pub fn push_stats(&mut self, stats: Stats) {
-        self.stats.push(stats);
+        self.active_mut().push_stats(stats);
     }
 
-    /// Enter на выбранной строке: открыть detail view.
-    /// Используем `visible_backend` — selected индексирует filtered, не backends.
+    pub fn select_previous(&mut self) {
+        let tab = self.current_tab;
+        self.active_mut().select_previous(tab);
+    }
+
+    pub fn select_next(&mut self) {
+        let tab = self.current_tab;
+        self.active_mut().select_next(tab);
+    }
+
+    pub fn cycle_sort_column(&mut self) {
+        self.active_mut().cycle_sort_column();
+    }
+
+    pub fn toggle_sort_direction(&mut self) {
+        self.active_mut().toggle_sort_direction();
+    }
+
+    pub fn handle_filter_input(&mut self, key: KeyEvent) {
+        self.active_mut().handle_filter_input(key);
+    }
+
+    pub fn enter_filter_mode(&mut self) {
+        self.mode = Mode::Filter;
+    }
+
+    pub fn exit_filter_mode(&mut self, commit: bool) {
+        if !commit {
+            self.active_mut().clear_filter();
+        }
+        self.mode = Mode::Normal;
+    }
+
     pub fn on_enter(&mut self) {
-        if let Some(idx) = self.table_state.selected()
-            && let Some(b) = self.visible_backend(idx)
+        let conn = self.active();
+        if let Some(idx) = conn.table_state.selected()
+            && let Some(b) = conn.visible_backend(idx)
         {
             self.mode = Mode::Detail(b.pid);
         }
     }
 
-    /// Закрыть Detail / другую модалку, вернуться в Normal.
     pub fn close_modal(&mut self) {
         self.mode = Mode::Normal;
     }
 
-    /// Хоткей `c` (Activity, actions_allowed): открыть confirm-cancel модалку
-    /// для выбранного backend'а. Игнорируем self-backend'ы (pgtop'овские
-    /// собственные соединения) — нельзя cancel'ить свой же запрос.
-    /// Возвращает true если модалка открылась — main по этому смотрит,
-    /// нужно ли что-то ещё делать.
     pub fn try_open_confirm_cancel(&mut self) -> bool {
-        if !self.actions_allowed || self.current_tab != Tab::Activity {
+        if self.current_tab != Tab::Activity {
             return false;
         }
-        let Some(idx) = self.table_state.selected() else {
+        let conn = self.active();
+        if !conn.actions_allowed {
+            return false;
+        }
+        let Some(idx) = conn.table_state.selected() else {
             return false;
         };
-        let Some(b) = self.visible_backend(idx) else {
+        let Some(b) = conn.visible_backend(idx) else {
             return false;
         };
         if b.is_self() {
@@ -544,23 +595,18 @@ impl App {
         true
     }
 
-    /// Записать результат action'а. Вызывается, когда executor
-    /// прислал свежий ActionResult.
-    pub fn set_action_result(&mut self, result: ActionResult) {
-        self.last_action_result = Some(result);
-    }
-
-    /// Хоткей `K` (Activity, actions_allowed): открыть confirm-terminate
-    /// модалку. Те же предохранители, что и для cancel: только Activity, только
-    /// не-self-row.
     pub fn try_open_confirm_terminate(&mut self) -> bool {
-        if !self.actions_allowed || self.current_tab != Tab::Activity {
+        if self.current_tab != Tab::Activity {
             return false;
         }
-        let Some(idx) = self.table_state.selected() else {
+        let conn = self.active();
+        if !conn.actions_allowed {
+            return false;
+        }
+        let Some(idx) = conn.table_state.selected() else {
             return false;
         };
-        let Some(b) = self.visible_backend(idx) else {
+        let Some(b) = conn.visible_backend(idx) else {
             return false;
         };
         if b.is_self() {
@@ -570,22 +616,18 @@ impl App {
         true
     }
 
-    /// Добавить символ в текст подтверждения terminate. No-op в других режимах.
     pub fn terminate_input_push(&mut self, c: char) {
         if let Mode::ConfirmTerminate(_, text) = &mut self.mode {
             text.push(c);
         }
     }
 
-    /// Удалить последний символ. No-op в других режимах.
     pub fn terminate_input_backspace(&mut self) {
         if let Mode::ConfirmTerminate(_, text) = &mut self.mode {
             text.pop();
         }
     }
 
-    /// Если в `Mode::ConfirmTerminate` и набрано ровно `yes` — закрыть модалку
-    /// и вернуть pid (caller отправит команду executor'у). Иначе — None.
     pub fn try_confirm_terminate(&mut self) -> Option<i32> {
         if let Mode::ConfirmTerminate(pid, text) = &self.mode
             && text == "yes"
@@ -597,70 +639,34 @@ impl App {
         None
     }
 
-    /// Войти в режим редактирования фильтра. Существующий input/regex
-    /// сохраняется — можно «дописывать» к старому фильтру.
-    pub fn enter_filter_mode(&mut self) {
-        self.mode = Mode::Filter;
+    pub fn set_action_result(&mut self, result: ActionResult) {
+        self.last_action_result = Some(result);
     }
 
-    /// Хоткей `s`: следующая колонка сортировки (циклом).
-    pub fn cycle_sort_column(&mut self) {
-        self.sort.by = self.sort.by.next();
-        self.recompute_filtered();
-    }
-
-    /// Хоткей `S`: переключить направление (asc ↔ desc).
-    pub fn toggle_sort_direction(&mut self) {
-        self.sort.direction = self.sort.direction.flip();
-        self.recompute_filtered();
-    }
-
-    /// Переключиться на конкретный таб (хоткеи 1/2/3/4).
     pub fn set_tab(&mut self, tab: Tab) {
         self.current_tab = tab;
     }
 
-    /// Переключиться на следующий таб циклом (хоткей `Tab`).
     pub fn next_tab(&mut self) {
         let next = (self.current_tab.index() + 1) % Tab::all().len();
         self.current_tab = Tab::from_index(next).unwrap();
     }
+}
 
-    /// Выйти из Filter mode. `commit=true` (Enter) — фильтр остаётся;
-    /// `commit=false` (Esc) — сбрасываем фильтр.
-    pub fn exit_filter_mode(&mut self, commit: bool) {
-        if !commit {
-            self.filter.clear();
-            self.recompute_filtered();
-        }
-        self.mode = Mode::Normal;
-    }
-
-    /// Транслировать `KeyEvent` → `InputRequest` и пробросить в `tui-input`.
-    /// Если ввод изменился (Some(StateChanged)) — пересобираем regex и `filtered`.
-    ///
-    /// Своя трансляция (вместо tui-input'овской `crossterm`-фичи) нужна потому,
-    /// что та версия фичи внутри tui-input 0.10 завязана на crossterm 0.28,
-    /// а у нас 0.29 — два несовместимых типа `Event` в дереве зависимостей.
-    /// Заодно: явный контроль над тем, какие хоткеи поддерживаем.
-    pub fn handle_filter_input(&mut self, key: KeyEvent) {
-        let Some(req) = key_to_request(key) else {
-            return;
-        };
-        if self.filter.input.handle(req).is_some() {
-            self.filter.rebuild_regex();
-            self.recompute_filtered();
-        }
+/// Helper: `clamp_table_state` для не-Activity табов (локs/replication/top_queries
+/// — нет filtered-проекции, list напрямую). Activity использует свой clamp в
+/// `recompute_filtered` (там есть filter+sort).
+fn clamp_table_state(state: &mut TableState, len: usize) {
+    match state.selected() {
+        _ if len == 0 => state.select(None),
+        Some(i) if i >= len => state.select(Some(len - 1)),
+        None => state.select(Some(0)),
+        Some(_) => {}
     }
 }
 
 /// Ring-буферы для sparkline'ов в шапке + последний снапшот для отображения
-/// текущего значения. Длина буферов = `STATS_HISTORY_LEN`; при переполнении
-/// `pop_front` сдвигает «горизонт» вправо (старые данные выпадают слева).
-///
-/// Несмотря на то, что Stats — это struct, мы храним каждое поле в своём
-/// VecDeque (а не VecDeque<Stats>): для render'а sparkline нужен срез
-/// одного метрика, а не кортежа всех. Memory cost минимальный.
+/// текущего значения. Per-connection (часть ConnectionState).
 pub struct StatsHistory {
     pub tps: VecDeque<f64>,
     pub conns: VecDeque<u32>,
@@ -682,9 +688,6 @@ impl Default for StatsHistory {
 }
 
 impl StatsHistory {
-    /// Push нового значения в каждое поле + drop старого если len > capacity.
-    /// `pop_front` на VecDeque — амортизированно O(1); никаких relayout'ов
-    /// массива, как у Vec.
     pub fn push(&mut self, stats: Stats) {
         push_bounded(&mut self.tps, stats.tps);
         push_bounded(&mut self.conns, stats.active_connections);
@@ -700,12 +703,6 @@ fn push_bounded<T>(buf: &mut VecDeque<T>, value: T) {
     }
 }
 
-/// Сравнить два backend'а по выбранной колонке. Без учёта direction —
-/// asc/desc применяется выше через `Ordering::reverse`.
-///
-/// Используем tuple/Option Ord, где это возможно: `Option<String>::cmp`
-/// имеет нужное поведение (None < Some, лексикографически), и нет лишних
-/// String-аллокаций. Для wait сравниваем как `(type, event)`-кортеж.
 fn compare_backends(a: &Backend, b: &Backend, by: SortBy, now: chrono::DateTime<Utc>) -> Ordering {
     match by {
         SortBy::Pid => a.pid.cmp(&b.pid),
@@ -714,9 +711,6 @@ fn compare_backends(a: &Backend, b: &Backend, by: SortBy, now: chrono::DateTime<
         SortBy::Wait => (a.wait_event_type.as_deref(), a.wait_event.as_deref())
             .cmp(&(b.wait_event_type.as_deref(), b.wait_event.as_deref())),
         SortBy::Duration => {
-            // `Option<TimeDelta>::cmp` — None < Some. Asc по duration =
-            // самые свежие/idle-без-query сначала; desc = самые долгие сверху
-            // (типичная задача мониторинга).
             let da = a.query_start.map(|s| now - s);
             let db = b.query_start.map(|s| now - s);
             da.cmp(&db)
@@ -725,14 +719,6 @@ fn compare_backends(a: &Backend, b: &Backend, by: SortBy, now: chrono::DateTime<
     }
 }
 
-/// Маппинг crossterm-клавиш на `tui_input::InputRequest`. Поддержанный
-/// набор — emacs/readline-стиль:
-/// - буквы/цифры → InsertChar
-/// - Backspace/Delete → удаление одного символа
-/// - стрелки/Home/End → перемещение курсора
-/// - Ctrl+A/E → начало/конец строки
-/// - Ctrl+U → очистить строку
-/// - Ctrl+W → удалить слово назад
 fn key_to_request(key: KeyEvent) -> Option<InputRequest> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 

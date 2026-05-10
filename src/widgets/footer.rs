@@ -13,7 +13,7 @@ use crate::app::{App, Mode, Tab};
 
 pub fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = match &app.mode {
-        Mode::Normal => normal_hints(app.current_tab, app.actions_allowed),
+        Mode::Normal => normal_hints(app.current_tab, app.active().actions_allowed),
         Mode::Detail(_) => Line::from(vec![
             Span::raw(" "),
             "Esc".bold(),

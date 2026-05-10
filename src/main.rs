@@ -20,7 +20,7 @@ mod views;
 mod widgets;
 
 use actions::{ActionCommand, ActionResult};
-use app::{App, Mode, Tab};
+use app::{App, ConnectionState, Mode, Tab};
 use db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
 
 /// CLI-аргументы. Phase 7: добавлены `profile` (positional), `--dsn`,
@@ -163,9 +163,19 @@ async fn main() -> Result<()> {
         cancel.clone(),
     ));
 
-    let mut app = App::new(resolved.actions_allowed);
-    app.profile_name = resolved.profile_name.clone();
-    app.read_only = resolved.read_only;
+    // Phase 8 block A: одно соединение пока, но архитектурно App ждёт Vec.
+    // Block B расширит до multi-profile через `pgtop [PROFILE...]` CLI.
+    let conn = ConnectionState::new(
+        resolved
+            .profile_name
+            .clone()
+            .unwrap_or_else(|| "default".to_string()),
+        resolved.dsn.clone(),
+        resolved.read_only,
+        resolved.actions_allowed,
+        resolved.profile_name.clone(),
+    );
+    let mut app = App::new(vec![conn]);
     app.theme = resolved.theme;
     let mut term = ui::TerminalGuard::new()?;
     let loop_result = run_event_loop(

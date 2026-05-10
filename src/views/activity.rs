@@ -19,7 +19,9 @@ use crate::{
 /// `now` зафиксирован один раз на кадр для консистентности duration во всех
 /// строках и для не-нарушения Ord в потенциально вложенных сортировках.
 pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App) {
-    let header = build_header_row(app.sort);
+    let theme = app.theme;
+    let conn = app.active_mut();
+    let header = build_header_row(conn.sort);
 
     let widths = [
         Constraint::Length(7),
@@ -31,11 +33,10 @@ pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     ];
 
     let now = Utc::now();
-    let theme = app.theme;
-    // Собираем в Vec явно: иначе immutable borrow от `app.visible_backends()`
+    // Собираем в Vec явно: иначе immutable borrow от `conn.visible_backends()`
     // тянется до конца Table::new(...) и мешает mutable borrow на
-    // `&mut app.table_state` ниже.
-    let rows: Vec<Row<'static>> = app
+    // `&mut conn.table_state` ниже.
+    let rows: Vec<Row<'static>> = conn
         .visible_backends()
         .map(|b| backend_to_row(b, now, theme))
         .collect();
@@ -44,7 +45,7 @@ pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App) {
         .header(header)
         .row_highlight_style(Style::new().reversed());
 
-    frame.render_stateful_widget(table, area, &mut app.table_state);
+    frame.render_stateful_widget(table, area, &mut conn.table_state);
 }
 
 /// Header с индикатором текущей сортировки (`▲`/`▼` после имени активной колонки).

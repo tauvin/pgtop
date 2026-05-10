@@ -12,14 +12,15 @@ use ratatui::{
 use crate::{app::App, db::Replica};
 
 pub fn render_replication(frame: &mut Frame, area: Rect, app: &mut App) {
-    if app.replication.is_empty() {
+    let conn = app.active_mut();
+    if conn.replication.is_empty() {
         render_empty(frame, area);
     } else {
         render_table(
             frame,
             area,
-            &app.replication,
-            &mut app.replication_table_state,
+            &conn.replication,
+            &mut conn.replication_table_state,
         );
     }
 }

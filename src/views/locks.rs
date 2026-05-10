@@ -23,13 +23,18 @@ pub fn render_locks(frame: &mut Frame, area: Rect, app: &mut App) {
     ];
 
     let theme = app.theme;
-    let rows: Vec<Row<'static>> = app.locks.iter().map(|l| lock_to_row(l, theme)).collect();
+    let rows: Vec<Row<'static>> = app
+        .active()
+        .locks
+        .iter()
+        .map(|l| lock_to_row(l, theme))
+        .collect();
 
     let table = Table::new(rows, widths)
         .header(header)
         .row_highlight_style(Style::new().reversed());
 
-    frame.render_stateful_widget(table, area, &mut app.locks_table_state);
+    frame.render_stateful_widget(table, area, &mut app.active_mut().locks_table_state);
 }
 
 /// `Lock` → `Row<'static>`. Waiting-локи (granted=false) подсвечиваем

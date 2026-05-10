@@ -110,7 +110,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     .areas(inner);
 
     tabs::render_tab_bar(frame, tabs_area, app.current_tab);
-    sparklines::render_sparklines(frame, sparklines_area, &app.stats);
+    sparklines::render_sparklines(frame, sparklines_area, &app.active().stats);
 
     match app.current_tab {
         Tab::Activity => render_activity(frame, content_area, app),
@@ -127,7 +127,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match &app.mode {
         Mode::Detail(pid) => {
             let pid = *pid;
-            if let Some(b) = app.backends.iter().find(|b| b.pid == pid) {
+            if let Some(b) = app.active().backends.iter().find(|b| b.pid == pid) {
                 detail::render_detail(frame, area, b);
             }
         }
@@ -157,26 +157,30 @@ fn title_for(app: &App) -> String {
     }
 }
 
-/// `pgtop [· profile] [· RO]` — head-индикаторы режима запуска.
+/// `pgtop [· profile] [· RO]` — head-индикаторы режима запуска. Phase 8:
+/// читаем из активного соединения; multi-conn (Block B) добавит ещё индикатор
+/// текущего connection-index'а из Vec.
 fn build_prefix(app: &App) -> String {
     let mut prefix = String::from("pgtop");
-    if let Some(profile) = &app.profile_name {
+    let conn = app.active();
+    if let Some(profile) = &conn.profile_name {
         prefix.push_str(" · ");
         prefix.push_str(profile);
     }
-    if app.read_only {
+    if conn.read_only {
         prefix.push_str(" · RO");
     }
     prefix
 }
 
 /// Per-tab counter — backends/locks/queries/replicas. Возвращает пустую
-/// строку если показывать нечего.
+/// строку если показывать нечего. Читает из активного соединения.
 fn tab_suffix(app: &App) -> String {
+    let conn = app.active();
     match app.current_tab {
         Tab::Activity => {
-            let visible = app.filtered.len();
-            let total = app.backends.len();
+            let visible = conn.filtered.len();
+            let total = conn.backends.len();
             if visible == total {
                 format!("{total} backends")
             } else {
@@ -184,20 +188,20 @@ fn tab_suffix(app: &App) -> String {
             }
         }
         Tab::Locks => {
-            let total = app.locks.len();
-            let waiting = app.locks.iter().filter(|l| !l.granted).count();
+            let total = conn.locks.len();
+            let waiting = conn.locks.iter().filter(|l| !l.granted).count();
             if waiting == 0 {
                 format!("{total} locks")
             } else {
                 format!("{waiting} waiting / {total} locks")
             }
         }
-        Tab::TopQueries => match &app.top_queries {
+        Tab::TopQueries => match &conn.top_queries {
             TopQueriesSnapshot::Available(queries) => format!("top {}", queries.len()),
             _ => String::new(),
         },
         Tab::Replication => {
-            let count = app.replication.len();
+            let count = conn.replication.len();
             if count == 0 {
                 "no replicas".to_string()
             } else {

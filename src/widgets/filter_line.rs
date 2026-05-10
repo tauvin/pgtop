@@ -24,10 +24,11 @@ use crate::theme::Theme;
 /// Filter имеет приоритет над action-result'ом, потому что при наборе фильтра
 /// пользователь активно набирает — статус не должен мешать.
 pub fn render_filter_line(frame: &mut Frame, area: Rect, app: &App) {
+    let conn = app.active();
     let line = if matches!(app.mode, Mode::Filter) {
-        filter_input_line(app)
-    } else if app.filter.regex.is_some() {
-        filter_status_line(app)
+        filter_input_line(conn)
+    } else if conn.filter.regex.is_some() {
+        filter_status_line(conn)
     } else if let Some(result) = &app.last_action_result {
         action_result_line(result, app.theme)
     } else {
@@ -37,9 +38,9 @@ pub fn render_filter_line(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn filter_input_line(app: &App) -> Line<'static> {
-    let value = app.filter.input.value();
-    let invalid = !value.is_empty() && app.filter.regex.is_none();
+fn filter_input_line(conn: &crate::app::ConnectionState) -> Line<'static> {
+    let value = conn.filter.input.value();
+    let invalid = !value.is_empty() && conn.filter.regex.is_none();
     let mut spans = vec![
         Span::raw(" /"),
         Span::raw(value.to_string()).bold(),
@@ -52,10 +53,10 @@ fn filter_input_line(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-fn filter_status_line(app: &App) -> Line<'static> {
+fn filter_status_line(conn: &crate::app::ConnectionState) -> Line<'static> {
     Line::from(vec![
         " filter: ".dim(),
-        app.filter.input.value().to_string().dim(),
+        conn.filter.input.value().to_string().dim(),
     ])
 }
 

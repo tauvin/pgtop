@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "pgtop"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "cargo-husky",
  "chrono",

@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-05-10
+
+Hardening release driven by a code review of 0.1.4. No new features —
+fixes and observability across security, correctness, and ergonomics.
+
+### Security
+
+- **`sslmode=verify-ca` now skips hostname verification**, matching
+  libpq's documented behaviour. Previously verify-ca was silently
+  treated as verify-full (chain + hostname). A new `ChainOnlyVerifier`
+  wraps `WebPkiServerVerifier` and ignores `NotValidForName` errors,
+  while `verify-full` retains the full check.
+- **EXPLAIN now sets `statement_timeout = '5s'`** before running the
+  plan and issues a Postgres-protocol `CancelRequest` via
+  `Client::cancel_token` when the user closes the popup. Previously
+  `client.query` already in flight could not be cancelled and a
+  pathological planner could wedge the connection indefinitely.
+- **Audit log split off into its own sink**: `pgtop-audit.log` (in the
+  state directory) only receives `target = "audit"` events regardless
+  of `RUST_LOG`, so users can't accidentally silence the audit trail
+  by raising the log level. Both audit and app logs are rotated daily
+  and created with mode `0600` on Unix; the log directory is `0700`.
+
+### Correctness
+
+- **Per-connection `last_action_result`**: action results from a
+  background connection are no longer dropped when the user is on a
+  different connection. Switching to that connection surfaces the
+  result.
+- **Cancellation lifecycle for the EXPLAIN popup**: switching
+  connections (Alt+N) or closing the popup now aborts the in-flight
+  task via a per-popup child token, instead of leaving it running.
+- **Collector errors are logged**: the catch-all `Err(_)` arms in all
+  seven collectors emit `tracing::warn!` with `collector`, `conn_idx`,
+  and `error` fields. Previously transient query errors (revoked
+  permissions, statement timeout, etc.) were silently swallowed and
+  the UI kept showing stale data with no signal.
+- **Shutdown timeout**: `join_all` on collector handles is now wrapped
+  in a 2 s timeout. A wedged task (e.g. tokio-postgres connect blocked
+  on slow DNS resolution) no longer keeps the process alive after the
+  user pressed `q`.
+
+### UX
+
+- **Filter matches more fields**: `Filter::matches` now checks query,
+  username, state, and database name. `/alice` finally works as a
+  username filter.
+- **Removed silent fallback to a docker-compose dev DSN**: with no
+  CLI flag, no `DATABASE_URL`, and no profile, pgtop used to try
+  `postgres://pgtop:pgtop@localhost:5433/pgtop` and report
+  "Connection refused". Now it errors out with a message naming the
+  three ways to provide a DSN.
+
+### Tests / CI
+
+- 7 new unit tests for `Resolved::from_layers` covering the priority
+  chain (CLI > env > profile), profile-not-found errors, and the
+  `actions_allowed = cli_allow_actions && !read_only` interaction
+  including the read-only-profile anti-fool seal.
+- 2 new tests for the expanded `Filter`.
+- `msrv` CI job now runs `cargo test` in addition to `cargo build`,
+  catching tests that quietly pull in newer-than-MSRV API.
+
 ## [0.1.4] — 2026-05-10
 
 ### Added
@@ -142,7 +205,8 @@ Initial release.
   before background tasks are awaited so the user doesn't see a frozen
   frame during teardown.
 
-[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/tauvin/pgtop/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/tauvin/pgtop/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/tauvin/pgtop/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/tauvin/pgtop/compare/v0.1.1...v0.1.2

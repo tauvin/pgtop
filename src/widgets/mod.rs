@@ -3,6 +3,7 @@
 
 pub mod confirm;
 pub mod detail;
+pub mod explain;
 pub mod filter_line;
 pub mod footer;
 pub mod sparklines;

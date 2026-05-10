@@ -14,6 +14,7 @@ mod app;
 mod collectors;
 mod config;
 mod db;
+mod explain;
 mod messages;
 mod theme;
 mod ui;
@@ -21,7 +22,7 @@ mod views;
 mod widgets;
 
 use actions::ActionCommand;
-use app::{App, ConnectionState, Mode, Tab};
+use app::{App, ConnectionState, ExplainPopup, Mode, Tab};
 use config::Resolved;
 use messages::UpdateMessage;
 
@@ -176,12 +177,18 @@ async fn main() -> Result<()> {
         action_txs.push(action_tx);
     }
 
-    drop(update_tx);
-
     let mut app = App::new(connections);
     app.theme = resolveds[0].theme;
     let mut term = ui::TerminalGuard::new()?;
-    let loop_result = run_event_loop(term.terminal(), &mut app, update_rx, action_txs).await;
+    let loop_result = run_event_loop(
+        term.terminal(),
+        &mut app,
+        update_rx,
+        action_txs,
+        update_tx,
+        cancel.clone(),
+    )
+    .await;
 
     drop(term);
     cancel.cancel();
@@ -197,6 +204,8 @@ async fn run_event_loop(
     app: &mut App,
     mut update_rx: mpsc::UnboundedReceiver<UpdateMessage>,
     action_txs: Vec<mpsc::UnboundedSender<ActionCommand>>,
+    update_tx_for_explain: mpsc::UnboundedSender<UpdateMessage>,
+    cancel_for_explain: CancellationToken,
 ) -> Result<()> {
     let mut events = EventStream::new();
 
@@ -256,11 +265,27 @@ async fn run_event_loop(
                                 KeyCode::Char('K') => {
                                     app.try_open_confirm_terminate();
                                 }
+                                KeyCode::Char('e') if app.current_tab == Tab::Activity => {
+                                    if let Some((pid, query)) = app.selected_query() {
+                                        app.mode = Mode::Explain(ExplainPopup::Loading { pid });
+                                        let dsn = app.active().dsn.clone();
+                                        let conn_idx = app.active;
+                                        let tx = update_tx_for_explain.clone();
+                                        let cancel = cancel_for_explain.clone();
+                                        tokio::spawn(explain::run_explain(
+                                            dsn, query, conn_idx, tx, cancel,
+                                        ));
+                                    }
+                                }
                                 _ => {}
                             },
                             Mode::Detail(_) => match key.code {
                                 KeyCode::Char('q') => return Ok(()),
                                 KeyCode::Esc => app.close_modal(),
+                                _ => {}
+                            },
+                            Mode::Explain(_) => match key.code {
+                                KeyCode::Esc | KeyCode::Char('q') => app.close_modal(),
                                 _ => {}
                             },
                             Mode::Filter => match key.code {
@@ -349,6 +374,21 @@ async fn run_event_loop(
                     Some(UpdateMessage::Status { conn_idx, status }) => {
                         if let Some(conn) = app.connection_mut(conn_idx) {
                             conn.status = status;
+                        }
+                    }
+                    Some(UpdateMessage::ExplainResult { conn_idx, plan }) => {
+                        if conn_idx == app.active
+                            && let Mode::Explain(ref state) = app.mode
+                        {
+                            let pid = match state {
+                                ExplainPopup::Loading { pid }
+                                | ExplainPopup::Ready { pid, .. }
+                                | ExplainPopup::Error { pid, .. } => *pid,
+                            };
+                            app.mode = Mode::Explain(match plan {
+                                Ok(plan) => ExplainPopup::Ready { pid, plan },
+                                Err(message) => ExplainPopup::Error { pid, message },
+                            });
                         }
                     }
                 }

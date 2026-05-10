@@ -77,6 +77,16 @@ pub enum Mode {
     Filter,
     ConfirmCancel(i32),
     ConfirmTerminate(i32, String),
+    Explain(ExplainPopup),
+}
+
+/// State of the EXPLAIN popup: `Loading` while the query runs, `Ready`
+/// with the plan text, or `Error` with the SQL error message.
+#[derive(Debug, Clone)]
+pub enum ExplainPopup {
+    Loading { pid: i32 },
+    Ready { pid: i32, plan: String },
+    Error { pid: i32, message: String },
 }
 
 #[derive(Default)]
@@ -685,6 +695,19 @@ impl App {
         {
             self.mode = Mode::Detail(b.pid);
         }
+    }
+
+    /// Selected backend's `(pid, query)` if Activity has a row selected and
+    /// the backend has a non-empty query. Used to drive the EXPLAIN popup.
+    pub fn selected_query(&self) -> Option<(i32, String)> {
+        let conn = self.active();
+        let idx = conn.table_state.selected()?;
+        let b = conn.visible_backend(idx)?;
+        let q = b.query.as_ref()?;
+        if q.trim().is_empty() {
+            return None;
+        }
+        Some((b.pid, q.clone()))
     }
 
     pub fn close_modal(&mut self) {

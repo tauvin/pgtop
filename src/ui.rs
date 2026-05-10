@@ -21,7 +21,7 @@ use crate::{
         render_activity, render_databases, render_locks, render_replication, render_tables,
         render_top_queries, render_waits,
     },
-    widgets::{confirm, detail, filter_line, footer, sparklines, tabs},
+    widgets::{confirm, detail, explain, filter_line, footer, sparklines, tabs},
 };
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -125,6 +125,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
         Mode::ConfirmTerminate(pid, typed) => {
             confirm::render_confirm_terminate(frame, area, *pid, typed);
+        }
+        Mode::Explain(popup) => {
+            explain::render_explain(frame, area, popup);
         }
         _ => {}
     }

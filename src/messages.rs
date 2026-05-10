@@ -47,4 +47,10 @@ pub enum UpdateMessage {
         conn_idx: usize,
         status: ConnectionStatus,
     },
+    /// Result of an ad-hoc `EXPLAIN`. `Ok(plan)` is the multi-line text;
+    /// `Err(msg)` carries the connect or query error.
+    ExplainResult {
+        conn_idx: usize,
+        plan: Result<String, String>,
+    },
 }

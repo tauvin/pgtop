@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-05-10
+
+### Added
+
+- **TLS support** via `tokio-postgres-rustls`. The `sslmode` value in the
+  DSN now drives the connector: `disable`, `prefer` (default), `require`
+  pass through to tokio-postgres directly with no certificate
+  verification (matching libpq); `verify-ca` and `verify-full` are
+  rewritten to `require` and turn on certificate verification against
+  the bundled Mozilla root store (`webpki-roots`). Hostname check is not
+  yet differentiated between verify-ca and verify-full. This unblocks
+  managed Postgres providers (RDS, Cloud SQL, Heroku, Supabase, …).
+- 28 unit tests covering `Filter`, `SortBy` / `SortDirection`,
+  `compare_backends`, and the view-level formatters
+  (`format_wait` / `format_duration` / `format_query` / `format_lag`).
+- `msrv` CI job that builds against rustc 1.88, the declared MSRV, so a
+  future code change that quietly relies on a newer feature is caught
+  before release.
+- `docs/demo.tape` — vhs script for recording the README demo GIF.
+
 ## [0.1.1] — 2026-05-10
 
 ### Fixed
@@ -61,6 +81,7 @@ Initial release.
   before background tasks are awaited so the user doesn't see a frozen
   frame during teardown.
 
-[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/tauvin/pgtop/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/tauvin/pgtop/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/tauvin/pgtop/releases/tag/v0.1.0

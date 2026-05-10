@@ -1,9 +1,12 @@
 use std::env;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 use clap::Parser;
 use color_eyre::eyre::{Context, Result};
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -256,112 +259,26 @@ async fn run_event_loop(
                             continue;
                         }
 
-                        match &app.mode {
-                            Mode::Normal => match key.code {
-                                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-
-                                KeyCode::Char('1') => app.set_tab(Tab::Activity),
-                                KeyCode::Char('2') => app.set_tab(Tab::Locks),
-                                KeyCode::Char('3') => app.set_tab(Tab::TopQueries),
-                                KeyCode::Char('4') => app.set_tab(Tab::Replication),
-                                KeyCode::Char('5') => app.set_tab(Tab::Databases),
-                                KeyCode::Char('6') => app.set_tab(Tab::Tables),
-                                KeyCode::Char('7') => app.set_tab(Tab::Waits),
-                                KeyCode::Tab => app.next_tab(),
-
-                                KeyCode::Up => app.select_previous(),
-                                KeyCode::Down => app.select_next(),
-
-                                KeyCode::Enter if app.current_tab == Tab::Activity => {
-                                    app.on_enter()
-                                }
-                                KeyCode::Char('/') if app.current_tab == Tab::Activity => {
-                                    app.enter_filter_mode()
-                                }
-                                KeyCode::Char('s') if app.current_tab == Tab::Activity => {
-                                    app.cycle_sort_column()
-                                }
-                                KeyCode::Char('S') if app.current_tab == Tab::Activity => {
-                                    app.toggle_sort_direction()
-                                }
-                                KeyCode::Char('c') => {
-                                    app.try_open_confirm_cancel();
-                                }
-                                KeyCode::Char('K') => {
-                                    app.try_open_confirm_terminate();
-                                }
-                                KeyCode::Char('g') if app.current_tab == Tab::Activity => {
-                                    app.enter_jump_mode();
-                                }
-                                KeyCode::Char('e') if app.current_tab == Tab::Activity => {
-                                    if let Some((pid, query)) = app.selected_query() {
-                                        // Per-popup token, child of the global
-                                        // shutdown token: closing the popup or
-                                        // switching connections cancels it
-                                        // without affecting other tasks.
-                                        let popup_cancel = cancel_for_explain.child_token();
-                                        app.begin_explain(pid, popup_cancel.clone());
-                                        let dsn = app.active().dsn.clone();
-                                        let conn_idx = app.active;
-                                        let tx = update_tx_for_explain.clone();
-                                        tokio::spawn(explain::run_explain(
-                                            dsn,
-                                            query,
-                                            conn_idx,
-                                            tx,
-                                            popup_cancel,
-                                        ));
-                                    }
-                                }
-                                _ => {}
-                            },
-                            Mode::Detail(_) => match key.code {
-                                KeyCode::Char('q') => return Ok(()),
-                                KeyCode::Esc => app.close_modal(),
-                                _ => {}
-                            },
-                            Mode::Explain(_) => match key.code {
-                                KeyCode::Esc | KeyCode::Char('q') => app.close_modal(),
-                                _ => {}
-                            },
-                            Mode::JumpToPid(_) => match key.code {
-                                KeyCode::Esc => app.close_modal(),
-                                KeyCode::Enter => {
-                                    let _ = app.try_jump_to_pid();
-                                }
-                                KeyCode::Backspace => app.jump_input_pop(),
-                                KeyCode::Char(c) => app.jump_input_push(c),
-                                _ => {}
-                            },
-                            Mode::Filter => match key.code {
-                                KeyCode::Esc => app.exit_filter_mode(false),
-                                KeyCode::Enter => app.exit_filter_mode(true),
-                                _ => app.handle_filter_input(key),
-                            },
-                            Mode::ConfirmCancel(pid) => match key.code {
-                                KeyCode::Enter => {
-                                    let pid = *pid;
-                                    let active = app.active;
-                                    let _ = action_txs[active]
-                                        .send(ActionCommand::Cancel { pid });
-                                    app.close_modal();
-                                }
-                                KeyCode::Esc => app.close_modal(),
-                                _ => {}
-                            },
-                            Mode::ConfirmTerminate(_, _) => match key.code {
-                                KeyCode::Esc => app.close_modal(),
-                                KeyCode::Enter => {
-                                    let active = app.active;
-                                    if let Some(pid) = app.try_confirm_terminate() {
-                                        let _ = action_txs[active]
-                                            .send(ActionCommand::Terminate { pid });
-                                    }
-                                }
-                                KeyCode::Backspace => app.terminate_input_backspace(),
-                                KeyCode::Char(c) => app.terminate_input_push(c),
-                                _ => {}
-                            },
+                        let outcome = match &app.mode {
+                            Mode::Normal => handle_normal_key(
+                                app,
+                                key,
+                                &update_tx_for_explain,
+                                &cancel_for_explain,
+                            ),
+                            Mode::Detail(_) => handle_detail_key(app, key),
+                            Mode::Explain(_) => handle_explain_key(app, key),
+                            Mode::JumpToPid(_) => handle_jump_key(app, key),
+                            Mode::Filter => handle_filter_key(app, key),
+                            Mode::ConfirmCancel(_) => {
+                                handle_confirm_cancel_key(app, key, &action_txs)
+                            }
+                            Mode::ConfirmTerminate(_, _) => {
+                                handle_confirm_terminate_key(app, key, &action_txs)
+                            }
+                        };
+                        if outcome.is_break() {
+                            return Ok(());
                         }
                     }
                     Some(Ok(Event::Mouse(mouse))) => match mouse.kind {
@@ -450,6 +367,138 @@ async fn run_event_loop(
             _ = tokio::signal::ctrl_c() => return Ok(()),
         }
     }
+}
+
+// Per-mode key dispatchers. Each returns `ControlFlow::Break(())` to
+// signal that the event loop should terminate; `Continue` keeps it running.
+
+fn handle_normal_key(
+    app: &mut App,
+    key: KeyEvent,
+    update_tx_for_explain: &mpsc::UnboundedSender<UpdateMessage>,
+    cancel_for_explain: &CancellationToken,
+) -> ControlFlow<()> {
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => return ControlFlow::Break(()),
+
+        KeyCode::Char('1') => app.set_tab(Tab::Activity),
+        KeyCode::Char('2') => app.set_tab(Tab::Locks),
+        KeyCode::Char('3') => app.set_tab(Tab::TopQueries),
+        KeyCode::Char('4') => app.set_tab(Tab::Replication),
+        KeyCode::Char('5') => app.set_tab(Tab::Databases),
+        KeyCode::Char('6') => app.set_tab(Tab::Tables),
+        KeyCode::Char('7') => app.set_tab(Tab::Waits),
+        KeyCode::Tab => app.next_tab(),
+
+        KeyCode::Up => app.select_previous(),
+        KeyCode::Down => app.select_next(),
+
+        KeyCode::Enter if app.current_tab == Tab::Activity => app.on_enter(),
+        KeyCode::Char('/') if app.current_tab == Tab::Activity => app.enter_filter_mode(),
+        KeyCode::Char('s') if app.current_tab == Tab::Activity => app.cycle_sort_column(),
+        KeyCode::Char('S') if app.current_tab == Tab::Activity => app.toggle_sort_direction(),
+        KeyCode::Char('c') => {
+            app.try_open_confirm_cancel();
+        }
+        KeyCode::Char('K') => {
+            app.try_open_confirm_terminate();
+        }
+        KeyCode::Char('g') if app.current_tab == Tab::Activity => app.enter_jump_mode(),
+        KeyCode::Char('e') if app.current_tab == Tab::Activity => {
+            if let Some((pid, query)) = app.selected_query() {
+                // Per-popup token, child of the global shutdown token:
+                // closing the popup or switching connections cancels it
+                // without affecting other tasks.
+                let popup_cancel = cancel_for_explain.child_token();
+                app.begin_explain(pid, popup_cancel.clone());
+                let dsn = app.active().dsn.clone();
+                let conn_idx = app.active;
+                let tx = update_tx_for_explain.clone();
+                tokio::spawn(explain::run_explain(dsn, query, conn_idx, tx, popup_cancel));
+            }
+        }
+        _ => {}
+    }
+    ControlFlow::Continue(())
+}
+
+fn handle_detail_key(app: &mut App, key: KeyEvent) -> ControlFlow<()> {
+    match key.code {
+        KeyCode::Char('q') => return ControlFlow::Break(()),
+        KeyCode::Esc => app.close_modal(),
+        _ => {}
+    }
+    ControlFlow::Continue(())
+}
+
+fn handle_explain_key(app: &mut App, key: KeyEvent) -> ControlFlow<()> {
+    if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+        app.close_modal();
+    }
+    ControlFlow::Continue(())
+}
+
+fn handle_jump_key(app: &mut App, key: KeyEvent) -> ControlFlow<()> {
+    match key.code {
+        KeyCode::Esc => app.close_modal(),
+        KeyCode::Enter => {
+            let _ = app.try_jump_to_pid();
+        }
+        KeyCode::Backspace => app.jump_input_pop(),
+        KeyCode::Char(c) => app.jump_input_push(c),
+        _ => {}
+    }
+    ControlFlow::Continue(())
+}
+
+fn handle_filter_key(app: &mut App, key: KeyEvent) -> ControlFlow<()> {
+    match key.code {
+        KeyCode::Esc => app.exit_filter_mode(false),
+        KeyCode::Enter => app.exit_filter_mode(true),
+        _ => app.handle_filter_input(key),
+    }
+    ControlFlow::Continue(())
+}
+
+fn handle_confirm_cancel_key(
+    app: &mut App,
+    key: KeyEvent,
+    action_txs: &[mpsc::UnboundedSender<ActionCommand>],
+) -> ControlFlow<()> {
+    let Mode::ConfirmCancel(pid) = &app.mode else {
+        return ControlFlow::Continue(());
+    };
+    match key.code {
+        KeyCode::Enter => {
+            let pid = *pid;
+            let active = app.active;
+            let _ = action_txs[active].send(ActionCommand::Cancel { pid });
+            app.close_modal();
+        }
+        KeyCode::Esc => app.close_modal(),
+        _ => {}
+    }
+    ControlFlow::Continue(())
+}
+
+fn handle_confirm_terminate_key(
+    app: &mut App,
+    key: KeyEvent,
+    action_txs: &[mpsc::UnboundedSender<ActionCommand>],
+) -> ControlFlow<()> {
+    match key.code {
+        KeyCode::Esc => app.close_modal(),
+        KeyCode::Enter => {
+            let active = app.active;
+            if let Some(pid) = app.try_confirm_terminate() {
+                let _ = action_txs[active].send(ActionCommand::Terminate { pid });
+            }
+        }
+        KeyCode::Backspace => app.terminate_input_backspace(),
+        KeyCode::Char(c) => app.terminate_input_push(c),
+        _ => {}
+    }
+    ControlFlow::Continue(())
 }
 
 /// Worker-guards for the two non-blocking writers — must outlive `main`

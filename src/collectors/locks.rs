@@ -13,8 +13,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::{self, Lock};
 
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
-
 /// Контракт идентичен `run_activity_collector`. См. `collectors/activity.rs`
 /// за подробностями про `biased;`-cancel-семантику и сигнал «UI ушёл» через
 /// `tx.send().is_err()`.
@@ -22,8 +20,9 @@ pub async fn run_locks_collector(
     client: Client,
     tx: watch::Sender<Vec<Lock>>,
     cancel: CancellationToken,
+    poll_interval: Duration,
 ) {
-    let mut ticker = interval(POLL_INTERVAL);
+    let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {

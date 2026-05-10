@@ -17,6 +17,8 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+figment = { version = "0.10", features = ["toml"] }
+dirs = "5"
 thiserror = "2"
 color-eyre = "0.6"
 tokio-util = "0.7"

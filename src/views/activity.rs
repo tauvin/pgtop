@@ -5,13 +5,14 @@ use chrono::{DateTime, Utc};
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::{Row, Table},
 };
 
 use crate::{
     app::{App, Sort, SortBy},
     db::Backend,
+    theme::Theme,
 };
 
 /// Контент Activity таба: stateful Table с TableState из App.
@@ -30,12 +31,13 @@ pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     ];
 
     let now = Utc::now();
+    let theme = app.theme;
     // Собираем в Vec явно: иначе immutable borrow от `app.visible_backends()`
     // тянется до конца Table::new(...) и мешает mutable borrow на
     // `&mut app.table_state` ниже.
     let rows: Vec<Row<'static>> = app
         .visible_backends()
-        .map(|b| backend_to_row(b, now))
+        .map(|b| backend_to_row(b, now, theme))
         .collect();
 
     let table = Table::new(rows, widths)
@@ -70,7 +72,7 @@ fn build_header_row(sort: Sort) -> Row<'static> {
     Row::new(cells).style(Style::new().add_modifier(Modifier::BOLD))
 }
 
-fn backend_to_row(b: &Backend, now: DateTime<Utc>) -> Row<'static> {
+fn backend_to_row(b: &Backend, now: DateTime<Utc>, theme: Theme) -> Row<'static> {
     Row::new([
         b.pid.to_string(),
         b.usename.clone().unwrap_or_else(em_dash),
@@ -79,22 +81,22 @@ fn backend_to_row(b: &Backend, now: DateTime<Utc>) -> Row<'static> {
         format_duration(b.query_start, now),
         format_query(b.query.as_deref()),
     ])
-    .style(row_style(b, now))
+    .style(row_style(b, now, theme))
 }
 
 /// Стиль строки исходя из state и duration активного запроса.
-/// Приоритет: self > красный > жёлтый > зелёный > default.
-/// - **Self** (pgtop собственное соединение): тёмно-серый — отдельный визуальный
-///   класс, чтобы пользователь видел «это я и cancel'ить нельзя».
-/// - Красный: active-запрос дольше 10с (визуальный сигнал «долгий»).
-/// - Жёлтый: idle in transaction (потенциально удерживает локи / vacuum).
-/// - Зелёный: обычный active (≤10с).
+/// Приоритет: self > danger > warning > success > default.
+/// - **Self** (pgtop собственное соединение): `theme.muted` — отдельный
+///   визуальный класс, чтобы пользователь видел «это я и cancel'ить нельзя».
+/// - **danger**: active-запрос дольше 10с (визуальный сигнал «долгий»).
+/// - **warning**: idle in transaction (потенциально удерживает локи / vacuum).
+/// - **success**: обычный active (≤10с).
 /// - Default: idle-сессии, fastpath function call и т.п.
-fn row_style(b: &Backend, now: DateTime<Utc>) -> Style {
+fn row_style(b: &Backend, now: DateTime<Utc>, theme: Theme) -> Style {
     const LONG_QUERY_THRESHOLD_SECS: i64 = 10;
 
     if b.is_self() {
-        return Style::new().fg(Color::DarkGray);
+        return Style::new().fg(theme.muted);
     }
 
     let state = b.state.as_deref();
@@ -105,14 +107,14 @@ fn row_style(b: &Backend, now: DateTime<Utc>) -> Style {
             .map(|s| (now - s).num_seconds() > LONG_QUERY_THRESHOLD_SECS)
             .unwrap_or(false);
         return if long {
-            Style::new().fg(Color::Red)
+            Style::new().fg(theme.danger)
         } else {
-            Style::new().fg(Color::Green)
+            Style::new().fg(theme.success)
         };
     }
 
     if state.is_some_and(|s| s.starts_with("idle in transaction")) {
-        return Style::new().fg(Color::Yellow);
+        return Style::new().fg(theme.warning);
     }
 
     Style::default()

@@ -13,14 +13,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::{self, Replica};
 
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
-
 pub async fn run_replication_collector(
     client: Client,
     tx: watch::Sender<Vec<Replica>>,
     cancel: CancellationToken,
+    poll_interval: Duration,
 ) {
-    let mut ticker = interval(POLL_INTERVAL);
+    let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {

@@ -16,6 +16,7 @@ use tui_input::{Input, InputRequest};
 
 use crate::actions::ActionResult;
 use crate::db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
+use crate::theme::Theme;
 
 /// Активный таб TUI. Каждый таб — отдельный «view» с собственными данными
 /// и хоткеями. `index()` соответствует позиции в `Tab::all()` (для tab bar).
@@ -234,15 +235,27 @@ pub struct App {
     pub sort: Sort,
     pub current_tab: Tab,
 
-    /// Phase 6: разрешены ли cancel/terminate-actions. Контролируется
-    /// CLI-флагом `--allow-actions`. По умолчанию false — безопасный default
-    /// для prod-мониторинга, чтобы случайно не послать pg_cancel_backend.
+    /// Phase 6: разрешены ли cancel/terminate-actions. Финальное resolved-значение
+    /// после layered config loading'а — учитывает CLI `--allow-actions`,
+    /// CLI `--read-only`, `profile.read_only`. См. `config::Resolved::from_layers`.
     pub actions_allowed: bool,
 
     /// Последний результат action'а от executor'а — отображается в status-line
     /// (filter-line area). `None` пока ни одной команды не было; иначе самый
     /// свежий результат.
     pub last_action_result: Option<ActionResult>,
+
+    /// Phase 7: имя активного профиля для отображения в title-bar. `None` —
+    /// если запущено без профиля (только CLI/env).
+    pub profile_name: Option<String>,
+
+    /// Phase 7: read-only mode для UI-индикации. Сама блокировка actions'ов
+    /// уже учтена в `actions_allowed`; это поле — только для отображения.
+    pub read_only: bool,
+
+    /// Phase 7: семантические цвета (Theme — Copy, cheap для копий
+    /// при передаче в render-функции).
+    pub theme: Theme,
 }
 
 impl App {
@@ -264,6 +277,9 @@ impl App {
             current_tab: Tab::Activity,
             actions_allowed,
             last_action_result: None,
+            profile_name: None,
+            read_only: false,
+            theme: Theme::default(),
         }
     }
 

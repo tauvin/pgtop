@@ -12,8 +12,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::{self, Backend};
 
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
-
 /// Запустить сборщик `pg_stat_activity` в текущей tokio-task.
 ///
 /// Контракт:
@@ -31,8 +29,9 @@ pub async fn run_activity_collector(
     client: Client,
     tx: watch::Sender<Vec<Backend>>,
     cancel: CancellationToken,
+    poll_interval: Duration,
 ) {
-    let mut ticker = interval(POLL_INTERVAL);
+    let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {

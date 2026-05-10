@@ -19,10 +19,16 @@ Skill активируется при работе над:
 
 ```
 src/
-  main.rs                — entry point: clap CLI parse → init audit log → 6×connect →
-                           6×spawn → TerminalGuard → event loop
+  main.rs                — entry point: clap CLI parse → load Config → resolve →
+                           init audit log → 6×connect → 6×spawn → TerminalGuard →
+                           event loop
   app.rs                 — App-state (per-tab data + Mode/Tab/Filter/Sort + StatsHistory
-                           + actions_allowed + last_action_result)
+                           + actions_allowed + last_action_result + theme +
+                           profile_name + read_only)
+  config.rs              — Config + Profile + UiConfig + IntervalsConfig + Resolved;
+                           figment for TOML loading, manual layering for CLI/env
+  theme.rs               — Theme (semantic colors: muted/success/warning/danger);
+                           dark/light constructors
   db.rs                  — Backend/Lock/Replica/TopQuery/Stats + fetch_* + raw SQL +
                            Backend::is_self() (через application_name)
   actions.rs             — ActionCommand + ActionResult + run_action_executor
@@ -550,6 +556,154 @@ fn init_audit_log() -> Result<WorkerGuard> {
 // main:
 let _log_guard = init_audit_log()?;  // underscore — Rust-сигнал «нужен ради Drop»
 ```
+
+---
+
+## Layered config: figment + Resolved struct
+
+Config-загрузка двухуровневая:
+
+1. **`Config` struct** соответствует TOML-файлу. Поля `Option<T>` или `#[serde(default)]` — конфиг должен парситься даже при отсутствии секций.
+2. **`Resolved` struct** — финальные runtime-значения после layering'а. Без `Option`, готовы к передаче в App / collectors / db.
+
+```rust
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Config {
+    pub default_profile: Option<String>,
+    #[serde(default)] pub profiles: HashMap<String, Profile>,
+    #[serde(default)] pub ui: UiConfig,
+    #[serde(default)] pub intervals: IntervalsConfig,
+}
+
+pub struct Resolved {
+    pub dsn: String,
+    pub actions_allowed: bool,
+    pub read_only: bool,
+    pub profile_name: Option<String>,
+    pub theme: Theme,
+    pub intervals: Intervals,
+}
+```
+
+**figment для file-loading**:
+```rust
+pub fn load() -> Result<Config> {
+    let path = config_path();
+    if !path.exists() { return Ok(Config::default()); }
+    Figment::new().merge(Toml::file(&path)).extract()
+        .map_err(|e| eyre!("failed to load config from {}: {e}", path.display()))
+}
+```
+
+figment даёт хорошие parse-ошибки с `file:line:column`. Для env+CLI layering'а на nested-структурах (HashMap) проще ручная логика — env-paths вида `PGTOP_PROFILES__LOCAL__DSN` неудобно набивать.
+
+**Layering в `Resolved::from_layers`** (приоритет: CLI > env > profile > defaults):
+```rust
+let dsn = cli_dsn.map(str::to_string)
+    .or_else(|| std::env::var("DATABASE_URL").ok())
+    .or(profile.dsn)
+    .unwrap_or_else(|| DEFAULT_DSN.to_string());
+
+// Sticky-off: any source can force on, but CLI can't disable.
+let read_only = cli_read_only || profile.read_only;
+let actions_allowed = cli_allow_actions && !read_only;
+```
+
+Sticky-off — анти-fool для read_only. Запустил `pgtop prod --allow-actions` по
+привычке, а профиль `prod` объявлен `read_only = true` — actions всё равно
+выключены. Pattern для destructive permission-flag'ов: hard-to-enable, easy-to-disable.
+
+**Profile not found**: при имени, которого нет в `[profiles.X]`, фейлим явно:
+```
+Error: profile 'prdo' not found in config; available: [local, prod, staging]
+```
+
+Listing доступных — стандарт UX, пользователь сразу видит правильное имя.
+
+**Resolved передаётся дальше**:
+```rust
+let resolved = config::Resolved::from_layers(&config, ...)?;
+// ...
+let mut app = App::new(resolved.actions_allowed);
+app.theme = resolved.theme;
+app.profile_name = resolved.profile_name.clone();
+tokio::spawn(run_activity_collector(client, tx, cancel, resolved.intervals.activity));
+```
+
+Resolved — это «applied config», stateless, тестируется как чистая функция.
+
+---
+
+## Theme: маленькая Copy-структура с семантическими цветами
+
+```rust
+#[derive(Debug, Clone, Copy)]
+pub struct Theme {
+    pub muted: Color,    // dim — главное dark/light различие
+    pub success: Color,  // ✓, active <10s
+    pub warning: Color,  // ⚠, idle in transaction
+    pub danger: Color,   // ✗, long query >10s, waiting lock
+}
+
+impl Theme {
+    pub const fn dark() -> Self {
+        Self { muted: Color::DarkGray, success: Color::Green,
+               warning: Color::Yellow, danger: Color::Red }
+    }
+    pub const fn light() -> Self {
+        Self { muted: Color::Gray, ..Self::dark() }  // ANSI Green/Yellow/Red OK на обоих
+    }
+}
+```
+
+**Минимум viable**: ANSI Red/Green/Yellow одинаково смотрятся на dark и light
+фонах (terminal сам рендерит согласно своей схеме). Реально различается только
+`muted` — `DarkGray` хорошо на dark, `Gray` на light.
+
+**Distinct vs semantic colors**. Sparkline'ы используют свои уникальные цвета
+(cyan/magenta/green) **не** через theme — они визуальные категоризаторы метрик,
+не сигналы успех/опасность. Confirm-popup'ы (yellow для cancel, red для terminate)
+тоже хардкодом — destructive-action-levels не зависят от темы пользователя.
+
+Theme — для **семантических состояний**, не для всех цветов.
+
+**`pub const fn`** на constructors. Theme компилируется в static data,
+никаких runtime-аллокаций для default-палитры.
+
+**Передача в render**: Theme — Copy, передаётся by value:
+```rust
+fn backend_to_row(b: &Backend, now: DateTime<Utc>, theme: Theme) -> Row<'static> { ... }
+```
+
+Cheaper чем `&Theme` reference (Theme — 4 × Color enum = ~4 bytes).
+Render-функции с `&App` читают `app.theme` напрямую.
+
+---
+
+## XDG paths: `dirs` + fallback chain
+
+```rust
+fn resolve_log_dir() -> PathBuf {
+    if let Ok(custom) = env::var("PGTOP_LOG_DIR") {
+        return PathBuf::from(custom);
+    }
+    dirs::state_dir()                                    // Linux: $XDG_STATE_HOME
+        .or_else(dirs::data_local_dir)                   // macOS/Windows fallback
+        .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("state")))
+        .unwrap_or_else(|| PathBuf::from("."))           // last resort: cwd
+        .join("pgtop")
+}
+```
+
+**Cross-platform asymmetry**:
+- `dirs::state_dir()` определён только в Linux/XDG. macOS/Windows возвращают `None`.
+- `dirs::data_local_dir()` универсален: Linux: `$XDG_DATA_HOME`, macOS: `~/Library/Application Support`, Windows: `%LOCALAPPDATA%`.
+- Fallback chain через `Option::or_else` lazy: следующий шаг зовётся только при `None` предыдущего.
+
+**`PGTOP_LOG_DIR` env override** — для CI/containers с read-only home, или
+для testing где каждый run в своём temp-dir.
+
+Тот же pattern для config-dir: `dirs::config_dir().unwrap_or_else(|| ".")`.
 
 ---
 

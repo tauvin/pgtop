@@ -14,14 +14,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::{self, TopQueriesSnapshot};
 
-const POLL_INTERVAL: Duration = Duration::from_secs(10);
-
 pub async fn run_top_queries_collector(
     client: Client,
     tx: watch::Sender<TopQueriesSnapshot>,
     cancel: CancellationToken,
+    poll_interval: Duration,
 ) {
-    let mut ticker = interval(POLL_INTERVAL);
+    let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {

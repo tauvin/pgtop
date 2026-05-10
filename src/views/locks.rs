@@ -3,11 +3,11 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::{Row, Table},
 };
 
-use crate::{app::App, db::Lock};
+use crate::{app::App, db::Lock, theme::Theme};
 
 /// Контент Locks таба: таблица из `app.locks`, индексируемая `app.locks_table_state`.
 pub fn render_locks(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -22,7 +22,8 @@ pub fn render_locks(frame: &mut Frame, area: Rect, app: &mut App) {
         Constraint::Min(0),
     ];
 
-    let rows: Vec<Row<'static>> = app.locks.iter().map(lock_to_row).collect();
+    let theme = app.theme;
+    let rows: Vec<Row<'static>> = app.locks.iter().map(|l| lock_to_row(l, theme)).collect();
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -31,9 +32,9 @@ pub fn render_locks(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_stateful_widget(table, area, &mut app.locks_table_state);
 }
 
-/// `Lock` → `Row<'static>`. Waiting-локи (granted=false) подсвечиваем красным —
-/// это типичный сигнал contention'а для мониторинга.
-fn lock_to_row(l: &Lock) -> Row<'static> {
+/// `Lock` → `Row<'static>`. Waiting-локи (granted=false) подсвечиваем
+/// `theme.danger` — типичный сигнал contention'а для мониторинга.
+fn lock_to_row(l: &Lock, theme: Theme) -> Row<'static> {
     let granted_marker = if l.granted { "✓" } else { "⏳" };
 
     let row = Row::new([
@@ -47,7 +48,7 @@ fn lock_to_row(l: &Lock) -> Row<'static> {
     if l.granted {
         row
     } else {
-        row.style(Style::new().fg(Color::Red))
+        row.style(Style::new().fg(theme.danger))
     }
 }
 

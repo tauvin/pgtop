@@ -9,8 +9,11 @@ use ratatui::{
     widgets::Paragraph,
 };
 
+use ratatui::style::Style;
+
 use crate::actions::{ActionCommand, ActionResult};
 use crate::app::{App, Mode};
+use crate::theme::Theme;
 
 /// Показывает (по приоритету):
 /// 1. В `Mode::Filter`: `/`-prompt + текущий ввод + cursor + invalid-индикатор.
@@ -26,7 +29,7 @@ pub fn render_filter_line(frame: &mut Frame, area: Rect, app: &App) {
     } else if app.filter.regex.is_some() {
         filter_status_line(app)
     } else if let Some(result) = &app.last_action_result {
-        action_result_line(result)
+        action_result_line(result, app.theme)
     } else {
         return;
     };
@@ -56,32 +59,28 @@ fn filter_status_line(app: &App) -> Line<'static> {
     ])
 }
 
-/// Цветовое кодирование результата:
-/// - Ok(true) → зелёный «✓ ok» — успех.
-/// - Ok(false) → жёлтый «no-op» — функция вернула false (нет такого pid'а
-///   или нет permission'ов).
-/// - Err → красный — SQL-ошибка.
-fn action_result_line(result: &ActionResult) -> Line<'static> {
+/// Цветовое кодирование результата (через theme):
+/// - Ok(true) → `theme.success` «✓ ok».
+/// - Ok(false) → `theme.warning` «no-op» — функция вернула false (нет
+///   такого pid'а или нет permission'ов).
+/// - Err → `theme.danger` — SQL-ошибка.
+fn action_result_line(result: &ActionResult, theme: Theme) -> Line<'static> {
     let pid = result.command.pid();
     let action = result.command.label();
-    match &result.outcome {
-        Ok(true) => Line::from(vec![
-            " ".into(),
-            "✓".green().bold(),
-            format!(" {action} pid {pid}: sent").green(),
-        ]),
-        Ok(false) => Line::from(vec![
-            " ".into(),
-            "⚠".yellow().bold(),
-            format!(" {action} pid {pid}: no such backend or insufficient permission").yellow(),
-        ]),
-        Err(e) => Line::from(vec![
-            " ".into(),
-            "✗".red().bold(),
-            format!(" {action} pid {pid}: ").red(),
-            e.clone().red(),
-        ]),
-    }
+    let (icon, color, msg) = match &result.outcome {
+        Ok(true) => ("✓", theme.success, format!(" {action} pid {pid}: sent")),
+        Ok(false) => (
+            "⚠",
+            theme.warning,
+            format!(" {action} pid {pid}: no such backend or insufficient permission"),
+        ),
+        Err(e) => ("✗", theme.danger, format!(" {action} pid {pid}: {e}")),
+    };
+    Line::from(vec![
+        " ".into(),
+        Span::styled(icon, Style::new().fg(color)).bold(),
+        Span::styled(msg, Style::new().fg(color)),
+    ])
 }
 
 // `ActionCommand` импортируется только для проверки доступности;

@@ -141,42 +141,67 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
-/// Заголовок-рамки: на Activity показываем счётчик backend'ов (с учётом
-/// фильтра); на Locks — счётчик локов с количеством waiting; на остальных
-/// табах — просто имя таба.
+/// Заголовок-рамки. Структура: ` pgtop [· profile] [· RO] — Tab (count) `.
+/// - Profile name (если в Resolved::profile_name): `· bidwise-prod`.
+/// - `· RO` (read-only): когда `app.read_only` — sticky-индикатор того, что
+///   actions заглушены даже если `--allow-actions` был на CLI.
+/// - Tab + per-tab count (как до Phase 7).
 fn title_for(app: &App) -> String {
+    let prefix = build_prefix(app);
     let tab = app.current_tab.label();
+    let suffix = tab_suffix(app);
+    if suffix.is_empty() {
+        format!(" {prefix} — {tab} ")
+    } else {
+        format!(" {prefix} — {tab} ({suffix}) ")
+    }
+}
+
+/// `pgtop [· profile] [· RO]` — head-индикаторы режима запуска.
+fn build_prefix(app: &App) -> String {
+    let mut prefix = String::from("pgtop");
+    if let Some(profile) = &app.profile_name {
+        prefix.push_str(" · ");
+        prefix.push_str(profile);
+    }
+    if app.read_only {
+        prefix.push_str(" · RO");
+    }
+    prefix
+}
+
+/// Per-tab counter — backends/locks/queries/replicas. Возвращает пустую
+/// строку если показывать нечего.
+fn tab_suffix(app: &App) -> String {
     match app.current_tab {
         Tab::Activity => {
             let visible = app.filtered.len();
             let total = app.backends.len();
             if visible == total {
-                format!(" pgtop — {tab} ({total} backends) ")
+                format!("{total} backends")
             } else {
-                format!(" pgtop — {tab} ({visible}/{total} backends) ")
+                format!("{visible}/{total} backends")
             }
         }
         Tab::Locks => {
             let total = app.locks.len();
             let waiting = app.locks.iter().filter(|l| !l.granted).count();
             if waiting == 0 {
-                format!(" pgtop — {tab} ({total} locks) ")
+                format!("{total} locks")
             } else {
-                format!(" pgtop — {tab} ({waiting} waiting / {total} locks) ")
+                format!("{waiting} waiting / {total} locks")
             }
         }
         Tab::TopQueries => match &app.top_queries {
-            TopQueriesSnapshot::Available(queries) => {
-                format!(" pgtop — {tab} (top {}) ", queries.len())
-            }
-            _ => format!(" pgtop — {tab} "),
+            TopQueriesSnapshot::Available(queries) => format!("top {}", queries.len()),
+            _ => String::new(),
         },
         Tab::Replication => {
             let count = app.replication.len();
             if count == 0 {
-                format!(" pgtop — {tab} (no replicas) ")
+                "no replicas".to_string()
             } else {
-                format!(" pgtop — {tab} ({count}) ")
+                count.to_string()
             }
         }
     }

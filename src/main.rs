@@ -12,7 +12,9 @@ use tracing_subscriber::EnvFilter;
 mod actions;
 mod app;
 mod collectors;
+mod config;
 mod db;
+mod theme;
 mod ui;
 mod views;
 mod widgets;
@@ -21,17 +23,33 @@ use actions::{ActionCommand, ActionResult};
 use app::{App, Mode, Tab};
 use db::{Backend, Lock, Replica, Stats, TopQueriesSnapshot};
 
-const DEFAULT_DSN: &str = "postgres://pgtop:pgtop@localhost:5433/pgtop";
-
-/// CLI-аргументы. На Phase 6 — только `--allow-actions`. Phase 7 расширит
-/// под profile-name, --read-only, --config и т.п.
+/// CLI-аргументы. Phase 7: добавлены `profile` (positional), `--dsn`,
+/// `--read-only`. Resolved-логика layered'ов в `config::Resolved::from_layers`.
 #[derive(Debug, Parser)]
-#[command(name = "pgtop", about = "Postgres activity TUI monitor")]
+#[command(
+    name = "pgtop",
+    about = "Postgres activity TUI monitor",
+    long_about = "TUI monitor for PostgreSQL.\n\
+                  Config: ~/.config/pgtop/config.toml (see config.example.toml in repo).\n\
+                  Layering: CLI flags > DATABASE_URL env > profile > defaults."
+)]
 struct Cli {
-    /// Разрешить cancel/terminate-actions на backend'ах. По умолчанию выключено
-    /// для безопасности прод-мониторинга. Без флага хоткеи `c`/`K` no-op.
+    /// Profile name from config. Falls back to default_profile.
+    profile: Option<String>,
+
+    /// Override DSN. Takes precedence over env and profile.
+    #[arg(long)]
+    dsn: Option<String>,
+
+    /// Allow cancel/terminate-actions on backends. Off by default.
+    /// Suppressed by `--read-only` or `read_only=true` in profile.
     #[arg(long)]
     allow_actions: bool,
+
+    /// Force read-only — disables cancel/terminate even if `--allow-actions`
+    /// is set. Useful for prod-profiles where actions should NEVER fire.
+    #[arg(long)]
+    read_only: bool,
 }
 
 #[tokio::main]
@@ -39,13 +57,29 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
 
+    // Phase 7: загрузить TOML-конфиг и свести все layer'ы (defaults → file
+    // → DATABASE_URL env → CLI) в финальный Resolved.
+    let config = config::load()?;
+    let resolved = config::Resolved::from_layers(
+        &config,
+        cli.profile.as_deref(),
+        cli.dsn.as_deref(),
+        cli.allow_actions,
+        cli.read_only,
+    )?;
+
     // Tracing → файл, не stdout/stderr (TUI владеет терминалом). Guard держим
     // в main до конца — при дропе non-blocking writer flush'нет буфер. Без
     // удержания guard'а строки могут потеряться, если процесс резко выйдет.
     let _log_guard = init_audit_log()?;
-    tracing::info!(allow_actions = cli.allow_actions, "pgtop starting");
+    tracing::info!(
+        profile = ?resolved.profile_name,
+        actions_allowed = resolved.actions_allowed,
+        read_only = resolved.read_only,
+        "pgtop starting"
+    );
 
-    let dsn = env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DSN.to_string());
+    let dsn = resolved.dsn.clone();
     // Каждый collector получает свой connection через отдельный `db::connect`.
     // tokio_postgres::Client не impl Clone (хотя внутри Arc'нут — public API
     // не экспонирует), и совместное использование через `Arc<Client>` тоже
@@ -96,26 +130,31 @@ async fn main() -> Result<()> {
         client_activity,
         activity_tx,
         cancel.clone(),
+        resolved.intervals.activity,
     ));
     let locks_handle = tokio::spawn(collectors::run_locks_collector(
         client_locks,
         locks_tx,
         cancel.clone(),
+        resolved.intervals.locks,
     ));
     let top_queries_handle = tokio::spawn(collectors::run_top_queries_collector(
         client_top_queries,
         top_queries_tx,
         cancel.clone(),
+        resolved.intervals.top_queries,
     ));
     let replication_handle = tokio::spawn(collectors::run_replication_collector(
         client_replication,
         replication_tx,
         cancel.clone(),
+        resolved.intervals.replication,
     ));
     let stats_handle = tokio::spawn(collectors::run_stats_collector(
         client_stats,
         stats_tx,
         cancel.clone(),
+        resolved.intervals.stats,
     ));
     let action_handle = tokio::spawn(actions::run_action_executor(
         client_actions,
@@ -124,7 +163,10 @@ async fn main() -> Result<()> {
         cancel.clone(),
     ));
 
-    let mut app = App::new(cli.allow_actions);
+    let mut app = App::new(resolved.actions_allowed);
+    app.profile_name = resolved.profile_name.clone();
+    app.read_only = resolved.read_only;
+    app.theme = resolved.theme;
     let mut term = ui::TerminalGuard::new()?;
     let loop_result = run_event_loop(
         term.terminal(),
@@ -384,23 +426,26 @@ async fn run_event_loop(
     }
 }
 
-/// Tracing → файл `~/.pgtop/pgtop.log` (или `./pgtop.log` если HOME пустой).
-/// Returns `WorkerGuard` — non-blocking writer запускает фоновый поток-writer,
-/// guard управляет его жизнью. Дропать guard слишком рано = терять последние
-/// записи (background-writer не успеет flush'нуть). Поэтому держим до конца main.
+/// Tracing → файл в XDG-state-директории, не stdout/stderr (TUI владеет
+/// терминалом). Returns `WorkerGuard` — non-blocking writer запускает фоновый
+/// поток-writer, guard управляет его жизнью. Дропать guard слишком рано =
+/// терять последние записи (background-writer не успеет flush'нуть).
+/// Поэтому держим до конца main.
 ///
-/// Phase 6: вся audit-инфа про cancel/terminate-actions полетит сюда через
+/// Phase 7: переезд с `~/.pgtop/pgtop.log` на XDG state dir
+/// (`~/.local/state/pgtop/pgtop.log` на Linux). Override через `PGTOP_LOG_DIR`
+/// для testing/CI/контейнеров где home filesystem read-only.
+///
+/// Audit-инфа про cancel/terminate-actions летит сюда через
 /// `tracing::info!(target: "audit", ...)`. Фильтр RUST_LOG позволяет
-/// раздельно настроить уровни для audit и других target'ов.
+/// раздельно настроить уровни для audit и других target'ов
+/// (`RUST_LOG=audit=info`).
 fn init_audit_log() -> Result<tracing_appender::non_blocking::WorkerGuard> {
-    let log_dir = match env::var("HOME") {
-        Ok(home) => PathBuf::from(home).join(".pgtop"),
-        Err(_) => PathBuf::from("."),
-    };
+    let log_dir = resolve_log_dir();
     std::fs::create_dir_all(&log_dir).wrap_err("create pgtop log dir")?;
 
     // `never` — не ротируем: для TUI-сессий длиной в часы-дни overkill.
-    // Phase 7 — переезд на `daily` + XDG_STATE_HOME, если действительно нужно.
+    // `daily` пригодится если станет актуально (long-running mode).
     let file_appender = tracing_appender::rolling::never(&log_dir, "pgtop.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -414,4 +459,26 @@ fn init_audit_log() -> Result<tracing_appender::non_blocking::WorkerGuard> {
         .init();
 
     Ok(guard)
+}
+
+/// XDG-resolved путь для log-файла:
+/// - **Linux**: `$XDG_STATE_HOME/pgtop` или `$HOME/.local/state/pgtop`.
+/// - **macOS**: `state_dir` отсутствует у Apple → fallback на
+///   `data_local_dir` (`~/Library/Application Support/pgtop`).
+/// - **Windows**: то же — `state_dir` нет, идём в
+///   `dirs::data_local_dir()` (`%LOCALAPPDATA%\pgtop`).
+/// - **Override**: `PGTOP_LOG_DIR` env — для CI/тестов/read-only-home сценариев.
+/// - **Last resort**: `./pgtop` относительно cwd.
+fn resolve_log_dir() -> PathBuf {
+    // Override env имеет наивысший приоритет.
+    if let Ok(custom) = env::var("PGTOP_LOG_DIR") {
+        return PathBuf::from(custom);
+    }
+
+    // Стандартный chain: XDG state → XDG data_local → fallback на $HOME/.local/state.
+    dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("state")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("pgtop")
 }

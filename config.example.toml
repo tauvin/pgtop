@@ -1,0 +1,50 @@
+# pgtop config — copy to ~/.config/pgtop/config.toml and edit.
+#
+# Layered loading priority (lowest → highest):
+#   1. Hardcoded defaults
+#   2. Profile selected by CLI arg or `default_profile` here
+#   3. DATABASE_URL env var
+#   4. CLI flags (--dsn, --allow-actions, --read-only)
+#
+# Usage:
+#   pgtop                # uses default_profile
+#   pgtop prod           # selects [profiles.prod]
+#   pgtop --dsn=...      # ad-hoc connection, ignores profiles
+#   pgtop prod --allow-actions    # ignored on read_only profile
+
+# Profile to use when no positional arg passed. Optional — if absent and no
+# CLI arg, falls back to DATABASE_URL env / DEFAULT_DSN.
+default_profile = "local"
+
+[profiles.local]
+# DSN can be URL form (postgres://user:pass@host:port/db) or libpq key=value
+# (host=... user=... password='...' dbname=...). Latter is friendlier with
+# special chars in passwords.
+dsn = "host=localhost user=pgtop password=pgtop port=5433 dbname=pgtop"
+
+[profiles.bidwise-prod]
+dsn = "host=prod-db.bidwise.example user=monitor dbname=catalog"
+# Profiles with read_only = true force actions_allowed = false even if
+# --allow-actions is passed on CLI. Anti-fool for the «I forgot the flag was on»
+# scenario when switching between local/prod profiles.
+read_only = true
+
+[profiles.bidwise-staging]
+dsn = "host=staging-db.bidwise.example user=monitor dbname=catalog"
+read_only = false
+
+[ui]
+# Theme: "dark" (default) or "light". Light theme uses Color::Gray for
+# muted/dim elements (self-row, hints) instead of DarkGray, which renders
+# better on light terminal backgrounds.
+theme = "dark"
+
+# Poll intervals in seconds. Each field is optional; missing = use default.
+# Defaults match what the project ships as sensible: activity 1s for live
+# feel, top_queries 10s because pg_stat_statements is aggregated, etc.
+[intervals]
+activity    = 1
+locks       = 1
+top_queries = 10
+replication = 5
+stats       = 1

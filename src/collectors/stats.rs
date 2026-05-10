@@ -16,14 +16,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::{self, Stats};
 
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
-
 pub async fn run_stats_collector(
     client: Client,
     tx: watch::Sender<Stats>,
     cancel: CancellationToken,
+    poll_interval: Duration,
 ) {
-    let mut ticker = interval(POLL_INTERVAL);
+    let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     // Local state — сохраняется между итерациями цикла.

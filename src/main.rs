@@ -16,6 +16,7 @@ mod config;
 mod db;
 mod explain;
 mod messages;
+mod persist;
 mod theme;
 mod ui;
 mod views;
@@ -180,6 +181,11 @@ async fn main() -> Result<()> {
 
     let mut app = App::new(connections);
     app.theme = resolveds[0].theme;
+
+    if let Some(state) = persist::load() {
+        state.apply(&mut app);
+    }
+
     let mut term = ui::TerminalGuard::new()?;
     let loop_result = run_event_loop(
         term.terminal(),
@@ -192,6 +198,7 @@ async fn main() -> Result<()> {
     .await;
 
     drop(term);
+    persist::save(&persist::UiState::from_app(&app));
     cancel.cancel();
 
     let _ = futures::future::join_all(handles).await;

@@ -66,6 +66,33 @@ impl Tab {
     pub fn from_index(i: usize) -> Option<Tab> {
         Self::all().get(i).copied()
     }
+
+    /// Stable string id used for persisted UI state — matches the label
+    /// in lowercase + no spaces.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Activity => "activity",
+            Self::Locks => "locks",
+            Self::TopQueries => "top_queries",
+            Self::Replication => "replication",
+            Self::Databases => "databases",
+            Self::Tables => "tables",
+            Self::Waits => "waits",
+        }
+    }
+
+    pub fn from_id(s: &str) -> Option<Self> {
+        match s {
+            "activity" => Some(Self::Activity),
+            "locks" => Some(Self::Locks),
+            "top_queries" => Some(Self::TopQueries),
+            "replication" => Some(Self::Replication),
+            "databases" => Some(Self::Databases),
+            "tables" => Some(Self::Tables),
+            "waits" => Some(Self::Waits),
+            _ => None,
+        }
+    }
 }
 
 /// Modal UI state. Global across the app — switching connections resets
@@ -150,6 +177,18 @@ impl SortBy {
             Self::Wait => "wait",
             Self::Duration => "duration",
             Self::Query => "query",
+        }
+    }
+
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s {
+            "pid" => Some(Self::Pid),
+            "user" => Some(Self::User),
+            "state" => Some(Self::State),
+            "wait" => Some(Self::Wait),
+            "duration" => Some(Self::Duration),
+            "query" => Some(Self::Query),
+            _ => None,
         }
     }
 }

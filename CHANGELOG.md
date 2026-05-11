@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-05-11
+
+Phase 13 internal refactor release driven by the architect's
+sequencing recommendation. One small user-visible feature; the rest is
+plumbing that pays back the next time someone touches the codebase.
+
+### Added
+
+- **Per-database TPS in the Databases tab.** A new `tps` column shows
+  the rate of commits + rollbacks per database, computed in the
+  collector from the delta between consecutive samples. First sample
+  is `—`; subsequent samples render the rate. Counter resets
+  (`pg_stat_reset()`, drop+recreate) gracefully fall back to one `—`
+  before re-baselining.
+
+### Changed (internal)
+
+- **Time-injection through the render path.** `ui::render` now takes
+  `now: DateTime<Utc>` and threads it to `count_slow`, `tab_suffix`,
+  `title_for`, `render_activity`, `render_tables`. Single `Utc::now()`
+  call lives in `run_event_loop` — the render path is deterministic
+  and snapshot-testable.
+- **UI snapshot tests via `insta` + `ratatui::TestBackend`.** Seven
+  snapshots at 120×24 cover Activity (populated and empty), Locks,
+  Databases, Tables, Detail popup, ConfirmTerminate popup. Changes to
+  layout, formatting, or colours surface as diffs.
+- **`src/app.rs` (~1300 lines) split** by data ownership into
+  `app/mod.rs` (App, Mode, ExplainPopup), `app/connection.rs`
+  (ConnectionState, ConnectionStatus, Filter, StatsHistory, WaitRow),
+  and `app/tab.rs` (Tab, SortBy, SortDirection). External call sites
+  unchanged thanks to `pub use` re-exports.
+- **Per-mode keymap handlers.** The 110-line nested match in
+  `run_event_loop` is now a 17-line dispatch to one of seven
+  `handle_<mode>_key` functions, each returning `ControlFlow<()>`.
+  Adding a new mode is a new handler + one match arm.
+- **Borrowed `Row<'a>` in Activity render.** `backend_to_row` returns
+  `Row<'a>` with `Cow<'a, str>` cells — usename / state / wait / query
+  are borrowed instead of cloned every frame. Disjoint-field borrow
+  (`&conn.backends` + `&mut conn.table_state`) bypasses the self-method
+  block.
+- **`Tab` and `SortBy` via `strum` derive.** `EnumIter`, `IntoStaticStr`,
+  `EnumString` replace the four parallel manual matches over variants.
+  `Tab::label()` stays manual because `Top Queries` has a space.
+
+### Tests / CI
+
+- 7 new UI snapshot tests, 4 new TPS-collector tests, 3 new round-trip
+  tests for `Tab::{id,from_id,index,from_index}` and `SortBy::{label,
+  from_label}`, plus 1 test for the new `format_tps` formatter.
+  Total: 66 tests (was 52).
+
 ## [0.1.5] — 2026-05-10
 
 Hardening release driven by a code review of 0.1.4. No new features —
@@ -205,7 +256,8 @@ Initial release.
   before background tasks are awaited so the user doesn't see a frozen
   frame during teardown.
 
-[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/tauvin/pgtop/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/tauvin/pgtop/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/tauvin/pgtop/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/tauvin/pgtop/compare/v0.1.2...v0.1.3

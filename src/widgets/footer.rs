@@ -90,7 +90,9 @@ fn normal_hints(tab: Tab, actions_allowed: bool, multi_conn: bool) -> Line<'stat
             "e".bold(),
             Span::raw(" explain  ·  "),
             "g".bold(),
-            Span::raw(" jump"),
+            Span::raw(" jump  ·  "),
+            "x".bold(),
+            Span::raw(" export"),
         ]);
 
         if actions_allowed {

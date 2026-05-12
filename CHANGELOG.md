@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-05-12
+
+### Added
+
+- **Export Activity to JSON.** Symmetric to the Top Queries export
+  from 0.1.8: press `x` on the Activity tab to dump the current
+  (filtered) snapshot to
+  `~/.local/share/pgtop/exports/activity-<profile>-<timestamp>.json`.
+  Each backend exports full `pg_stat_activity` columns plus two
+  derived fields: `duration_secs` (= `now - query_start`) and
+  `idle_secs` (= `now - state_change`, set only for backends whose
+  state starts with `idle`). The latter is the headline number for
+  spotting long idle-in-transaction sessions. Filter pattern (if any)
+  and the unfiltered `total_count` are included as export metadata so
+  it's obvious when the export is a subset.
+
 ## [0.1.8] — 2026-05-12
 
 Top Queries quality-of-life release.
@@ -355,7 +371,8 @@ Initial release.
   before background tasks are awaited so the user doesn't see a frozen
   frame during teardown.
 
-[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/tauvin/pgtop/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/tauvin/pgtop/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/tauvin/pgtop/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/tauvin/pgtop/compare/v0.1.5...v0.1.6

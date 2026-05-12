@@ -415,6 +415,9 @@ fn handle_normal_key(
         KeyCode::Char('x') if app.current_tab == Tab::TopQueries => {
             export_top_queries(app);
         }
+        KeyCode::Char('x') if app.current_tab == Tab::Activity => {
+            export_activity(app);
+        }
         _ => {}
     }
     ControlFlow::Continue(())
@@ -438,6 +441,48 @@ fn export_top_queries(app: &mut App) {
         Ok(path) => format!("Exported {} queries to {}", queries.len(), path.display()),
         Err(e) => {
             tracing::warn!(error = %e, "top queries export failed");
+            format!("Export failed: {e}")
+        }
+    };
+    conn.last_notice = Some(notice);
+}
+
+/// Write the current Activity snapshot (filtered set) to a timestamped
+/// JSON file and surface the path via the connection's notice.
+fn export_activity(app: &mut App) {
+    let conn = app.active_mut();
+    let total_count = conn.backends.len();
+    if total_count == 0 {
+        conn.last_notice = Some("Activity snapshot is empty".to_string());
+        return;
+    }
+    let visible: Vec<&db::Backend> = conn
+        .filtered
+        .iter()
+        .filter_map(|&i| conn.backends.get(i))
+        .collect();
+    let profile = conn.profile_name.clone();
+    let filter_pattern = conn
+        .filter
+        .regex
+        .as_ref()
+        .map(|_| conn.filter.input.value().to_string());
+    let now = chrono::Utc::now();
+    let notice = match export::write_activity(
+        &visible,
+        total_count,
+        profile.as_deref(),
+        filter_pattern.as_deref(),
+        now,
+    ) {
+        Ok(path) => format!(
+            "Exported {} of {} backends to {}",
+            visible.len(),
+            total_count,
+            path.display()
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, "activity export failed");
             format!("Export failed: {e}")
         }
     };

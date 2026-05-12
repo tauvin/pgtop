@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-12
+
+Investigation-workflow release. Snapshots stop being a one-way
+dead-end and become a full live-→-frozen-→-share-→-replay-→-diff
+cycle. The 0.1.x line was about looking at what's happening right
+now; 0.2 is about taking that picture with you.
+
+### Added
+
+- **`X` (shift+x) hotkey: full session snapshot.** One file with all
+  seven tabs plus the currently-selected tab, active filter, and a
+  `schema_version` field. Lives next to the per-tab exports under
+  `~/.local/share/pgtop/exports/`.
+- **`pgtop replay <FILE>` subcommand.** Open a snapshot in a
+  read-only TUI without touching a database. Title bar reads
+  `pgtop · REPLAY · …`. EXPLAIN is gated off (no live connection);
+  cancel/terminate are already disabled because the conn is
+  constructed with `read_only = true`. `x` and `X` still work in
+  replay — re-exporting the snapshot you're inspecting is harmless
+  and occasionally useful.
+- **`pgtop diff <A> <B>` subcommand.** Structural diff between two
+  snapshots. Each tab has its own identity key (pid for backends,
+  query text for top queries, `(schema, relname)` for tables, etc.)
+  and its own notion of change. Default output is a human-readable
+  text report; `--json` emits a `SessionDiff` document.
+- **Exports for the remaining four tabs.** `x` now works on
+  Databases, Tables, Replication, and Waits as well, with the same
+  shape as the existing Activity / Locks / Top Queries writers.
+  Waits export materialises a `share_pct` per row; Databases includes
+  the collector-derived `tps`; Tables materialises `dead_pct`.
+- **`s` hotkey in the EXPLAIN popup.** Saves the rendered plan text
+  to `explain-pid<N>-<timestamp>.txt`. No-op while the popup is
+  Loading or Error.
+
+### Changed
+
+- **CLI grew subcommands** while keeping the no-subcommand form
+  bit-for-bit backward-compatible. `pgtop`, `pgtop prod`, and
+  `pgtop prod staging` all behave exactly as before; `pgtop replay
+  <FILE>` and `pgtop diff <A> <B>` are the new shapes. Implemented
+  via `subcommand_precedence_over_arg` so the positional `profiles`
+  Vec doesn't swallow subcommand names.
+- **mpsc channels migrated from unbounded to bounded.** The
+  collector → UI channel has capacity 256 and the action channel has
+  capacity 8; both use `try_send` and drop-on-full with a `warn` log.
+  Closes the deferred "bounded mpsc + drop-oldest" entry from the
+  Phase 14 backlog.
+
+### Tests / CI
+
+- Snapshot tests now cover all seven tabs (Top Queries Available
+  and ExtensionMissing, Replication, Waits) plus the REPLAY title
+  indicator.
+- 13 unit tests for the diff and replay modules: round-trip session
+  write+load, schema_version mismatch, per-tab change classification,
+  unknown-tab fallback.
+- Total: 92 → 102.
+
 ## [0.1.10] — 2026-05-12
 
 ### Added
@@ -382,7 +440,8 @@ Initial release.
   before background tasks are awaited so the user doesn't see a frozen
   frame during teardown.
 
-[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/tauvin/pgtop/compare/v0.1.10...v0.2.0
 [0.1.10]: https://github.com/tauvin/pgtop/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/tauvin/pgtop/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/tauvin/pgtop/compare/v0.1.7...v0.1.8

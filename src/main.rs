@@ -2,7 +2,7 @@ use std::env;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Context, Result};
 use crossterm::event::{
     Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
@@ -43,11 +43,19 @@ use messages::UpdateMessage;
     long_about = "TUI monitor for PostgreSQL.\n\
                   Config: ~/.config/pgtop/config.toml (see config.example.toml in repo).\n\
                   Layering: CLI flags > DATABASE_URL env > profile > defaults.\n\
-                  Multi-connection: pgtop prof1 prof2 ... — Alt+N to switch."
+                  Multi-connection: pgtop prof1 prof2 ... — Alt+N to switch.\n\
+                  Subcommands: replay <FILE> opens a frozen snapshot in a\n\
+                  read-only TUI; diff <A> <B> shows what changed between two.",
+    // Make subcommand names win over the positional profiles Vec, so
+    // `pgtop replay foo.json` dispatches to the subcommand even though
+    // `replay` would otherwise be parsed as a profile name.
+    subcommand_precedence_over_arg = true,
+    args_conflicts_with_subcommands = true,
 )]
 struct Cli {
     /// Profile name(s) from config. Multiple profiles open multi-connection
     /// session, switchable via Alt+1/Alt+2/...
+    /// Ignored when a subcommand is given.
     profiles: Vec<String>,
 
     /// Override DSN. Takes precedence over env and profile.
@@ -63,6 +71,29 @@ struct Cli {
     /// is set. Useful for prod-profiles where actions should NEVER fire.
     #[arg(long)]
     read_only: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Open a snapshot file (produced by the `X` hotkey or `pgtop dump`)
+    /// in a read-only TUI. No database connection is opened.
+    Replay {
+        /// Path to a JSON snapshot file.
+        file: PathBuf,
+    },
+    /// Compare two snapshot files and print what changed between them.
+    Diff {
+        /// Earlier snapshot.
+        a: PathBuf,
+        /// Later snapshot.
+        b: PathBuf,
+        /// Emit a machine-readable JSON diff instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -70,6 +101,26 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
 
+    match cli.command {
+        Some(Command::Replay { file }) => run_replay(&file).await,
+        Some(Command::Diff { a, b, json }) => run_diff(&a, &b, json),
+        None => run_live(cli).await,
+    }
+}
+
+async fn run_replay(_file: &std::path::Path) -> Result<()> {
+    Err(color_eyre::eyre::eyre!(
+        "pgtop replay is not implemented yet (step 4 of the 0.2.0 plan)"
+    ))
+}
+
+fn run_diff(_a: &std::path::Path, _b: &std::path::Path, _json: bool) -> Result<()> {
+    Err(color_eyre::eyre::eyre!(
+        "pgtop diff is not implemented yet (step 5 of the 0.2.0 plan)"
+    ))
+}
+
+async fn run_live(cli: Cli) -> Result<()> {
     let config = config::load()?;
 
     let resolveds: Vec<Resolved> = if cli.profiles.is_empty() {

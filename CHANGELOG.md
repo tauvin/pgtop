@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-05-12
+
+Top Queries quality-of-life release.
+
+### Added
+
+- **Export Top Queries to JSON.** Press `x` on the Top Queries tab to
+  dump the current snapshot to
+  `~/.local/share/pgtop/exports/top-queries-<profile>-<timestamp>.json`
+  (macOS: `~/Library/Application Support/pgtop/exports/`). Each query
+  is serialised with rank, full query text, calls, total/mean exec
+  time, rows, and `share_of_total_time_pct` — the 80/20 view that
+  answers "which query owns the runtime?" at a glance. The path
+  appears in the filter line after a successful export, and the
+  footer hints `x export json` whenever Top Queries is active.
+
+### Changed
+
+- **`<insufficient privilege>` rows are filtered out of Top Queries.**
+  pg_stat_statements puts that literal in the query column for
+  statements the calling role can't see (no `pg_read_all_stats` and
+  not the owner). These rows aggregate every hidden statement and
+  often dominate the top by total_exec_time without telling the user
+  anything actionable — there's no query text to read and no pid to
+  act on. Filtered at the source via
+  `WHERE query <> '<insufficient privilege>'`; NULL queries excluded
+  for the same reason.
+
 ## [0.1.7] — 2026-05-12
 
 Cleanup release driven by a second three-reviewer pass over the
@@ -327,7 +355,8 @@ Initial release.
   before background tasks are awaited so the user doesn't see a frozen
   frame during teardown.
 
-[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/tauvin/pgtop/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/tauvin/pgtop/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/tauvin/pgtop/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/tauvin/pgtop/compare/v0.1.4...v0.1.5

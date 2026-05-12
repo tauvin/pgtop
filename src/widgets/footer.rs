@@ -103,6 +103,8 @@ fn normal_hints(tab: Tab, actions_allowed: bool, multi_conn: bool) -> Line<'stat
                 Span::raw(" terminate").red(),
             ]);
         }
+    } else if tab == Tab::TopQueries {
+        spans.extend([Span::raw(SEP), "x".bold(), Span::raw(" export json")]);
     } else if actions_allowed {
         spans.extend([Span::raw(SEP), "actions".bold().yellow()]);
     }

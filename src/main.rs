@@ -20,6 +20,7 @@ mod collectors;
 mod config;
 mod db;
 mod explain;
+mod export;
 mod messages;
 mod persist;
 mod theme;
@@ -411,9 +412,36 @@ fn handle_normal_key(
                 tokio::spawn(explain::run_explain(dsn, query, conn_idx, tx, popup_cancel));
             }
         }
+        KeyCode::Char('x') if app.current_tab == Tab::TopQueries => {
+            export_top_queries(app);
+        }
         _ => {}
     }
     ControlFlow::Continue(())
+}
+
+/// Write the current Top Queries snapshot to a timestamped JSON file
+/// and surface the path (or error) via the connection's notice.
+fn export_top_queries(app: &mut App) {
+    use crate::db::TopQueriesSnapshot;
+    let conn = app.active_mut();
+    let queries = match &conn.top_queries {
+        TopQueriesSnapshot::Available(qs) if !qs.is_empty() => qs.clone(),
+        _ => {
+            conn.last_notice = Some("Top Queries not available yet".to_string());
+            return;
+        }
+    };
+    let profile = conn.profile_name.clone();
+    let now = chrono::Utc::now();
+    let notice = match export::write(&queries, profile.as_deref(), now) {
+        Ok(path) => format!("Exported {} queries to {}", queries.len(), path.display()),
+        Err(e) => {
+            tracing::warn!(error = %e, "top queries export failed");
+            format!("Export failed: {e}")
+        }
+    };
+    conn.last_notice = Some(notice);
 }
 
 fn handle_detail_key(app: &mut App, key: KeyEvent) -> ControlFlow<()> {

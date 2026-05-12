@@ -114,6 +114,9 @@ pub struct ConnectionState {
     /// per-connection so a result that arrives while the user is on
     /// another conn isn't dropped — switching back surfaces it.
     pub last_action_result: Option<ActionResult>,
+    /// Last transient notice (e.g. "exported to /tmp/foo.json"). Same
+    /// per-conn rationale as `last_action_result`.
+    pub last_notice: Option<String>,
 }
 
 /// One aggregated row in the Waits histogram. `count` is how many backends
@@ -160,6 +163,7 @@ impl ConnectionState {
             waits_table_state: TableState::default(),
             stats: StatsHistory::default(),
             last_action_result: None,
+            last_notice: None,
         }
     }
 

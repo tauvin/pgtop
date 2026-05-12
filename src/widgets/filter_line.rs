@@ -15,8 +15,8 @@ use crate::app::{App, Mode};
 use crate::theme::Theme;
 
 /// Render the filter line. Shows (in priority order): the filter prompt in
-/// `Mode::Filter`, the active filter pattern, the last action result, or
-/// nothing.
+/// `Mode::Filter`, the active filter pattern, the last action result, the
+/// last transient notice, or nothing.
 pub fn render_filter_line(frame: &mut Frame, area: Rect, app: &App) {
     let conn = app.active();
     let line = if matches!(app.mode, Mode::Filter) {
@@ -27,11 +27,17 @@ pub fn render_filter_line(frame: &mut Frame, area: Rect, app: &App) {
         filter_status_line(conn)
     } else if let Some(result) = &conn.last_action_result {
         action_result_line(result, app.theme)
+    } else if let Some(notice) = &conn.last_notice {
+        notice_line(notice)
     } else {
         return;
     };
 
     frame.render_widget(Paragraph::new(line), area);
+}
+
+fn notice_line(notice: &str) -> Line<'static> {
+    Line::from(vec![" ".into(), notice.to_string().dim()])
 }
 
 fn jump_input_line(input: &str) -> Line<'static> {

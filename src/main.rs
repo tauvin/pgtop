@@ -418,6 +418,9 @@ fn handle_normal_key(
         KeyCode::Char('x') if app.current_tab == Tab::Activity => {
             export_activity(app);
         }
+        KeyCode::Char('x') if app.current_tab == Tab::Locks => {
+            export_locks(app);
+        }
         _ => {}
     }
     ControlFlow::Continue(())
@@ -441,6 +444,27 @@ fn export_top_queries(app: &mut App) {
         Ok(path) => format!("Exported {} queries to {}", queries.len(), path.display()),
         Err(e) => {
             tracing::warn!(error = %e, "top queries export failed");
+            format!("Export failed: {e}")
+        }
+    };
+    conn.last_notice = Some(notice);
+}
+
+/// Write the current Locks snapshot to a timestamped JSON file and
+/// surface the path via the connection's notice.
+fn export_locks(app: &mut App) {
+    let conn = app.active_mut();
+    if conn.locks.is_empty() {
+        conn.last_notice = Some("Locks snapshot is empty".to_string());
+        return;
+    }
+    let locks = conn.locks.clone();
+    let profile = conn.profile_name.clone();
+    let now = chrono::Utc::now();
+    let notice = match export::write_locks(&locks, profile.as_deref(), now) {
+        Ok(path) => format!("Exported {} locks to {}", locks.len(), path.display()),
+        Err(e) => {
+            tracing::warn!(error = %e, "locks export failed");
             format!("Export failed: {e}")
         }
     };

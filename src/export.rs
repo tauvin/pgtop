@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::db::{Backend, TopQuery};
+use crate::db::{Backend, Lock, TopQuery};
 
 /// One row in the exported JSON. `share_of_total_time_pct` is computed
 /// against the sum of `total_exec_time_ms` across the snapshot — the
@@ -96,6 +96,10 @@ pub fn export_path(profile: Option<&str>, now: DateTime<Utc>) -> PathBuf {
 
 pub fn activity_export_path(profile: Option<&str>, now: DateTime<Utc>) -> PathBuf {
     timestamped_path("activity", profile, now)
+}
+
+pub fn locks_export_path(profile: Option<&str>, now: DateTime<Utc>) -> PathBuf {
+    timestamped_path("locks", profile, now)
 }
 
 /// Write the snapshot to disk, creating the export dir if needed.
@@ -237,6 +241,70 @@ pub fn write_activity(
     Ok(path)
 }
 
+/// One row in the Locks export.
+#[derive(Serialize)]
+struct ExportedLock<'a> {
+    pid: i32,
+    locktype: &'a str,
+    mode: &'a str,
+    granted: bool,
+    object: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct LocksExport<'a> {
+    generated_at: DateTime<Utc>,
+    profile: Option<&'a str>,
+    exported_count: usize,
+    /// Number of locks with `granted = true`.
+    granted_count: usize,
+    /// Number of locks waiting (`granted = false`). Non-zero values are
+    /// the interesting case — there's at least one blocked backend.
+    waiting_count: usize,
+    locks: Vec<ExportedLock<'a>>,
+}
+
+pub fn render_locks_json(
+    locks: &[Lock],
+    profile: Option<&str>,
+    now: DateTime<Utc>,
+) -> serde_json::Result<String> {
+    let waiting_count = locks.iter().filter(|l| !l.granted).count();
+    let exported: Vec<ExportedLock<'_>> = locks
+        .iter()
+        .map(|l| ExportedLock {
+            pid: l.pid,
+            locktype: &l.locktype,
+            mode: &l.mode,
+            granted: l.granted,
+            object: l.object.as_deref(),
+        })
+        .collect();
+    let export = LocksExport {
+        generated_at: now,
+        profile,
+        exported_count: exported.len(),
+        granted_count: exported.len() - waiting_count,
+        waiting_count,
+        locks: exported,
+    };
+    serde_json::to_string_pretty(&export)
+}
+
+pub fn write_locks(
+    locks: &[Lock],
+    profile: Option<&str>,
+    now: DateTime<Utc>,
+) -> std::io::Result<PathBuf> {
+    let body = render_locks_json(locks, profile, now)
+        .map_err(|e| std::io::Error::other(format!("serialise locks: {e}")))?;
+    let dir = export_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = locks_export_path(profile, now);
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +438,60 @@ mod tests {
         let backends = vec![&b];
         let json = render_activity_json(&backends, 1, None, None, now).unwrap();
         assert!(json.contains("\"is_self\": true"));
+    }
+
+    #[test]
+    fn locks_path_uses_distinct_prefix() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 10, 34, 5).unwrap();
+        let p = locks_export_path(Some("prod"), now);
+        assert_eq!(
+            p.file_name().unwrap().to_string_lossy(),
+            "locks-prod-20260512-103405.json"
+        );
+    }
+
+    fn lock(pid: i32, granted: bool, object: Option<&str>) -> Lock {
+        Lock {
+            pid,
+            locktype: "relation".to_string(),
+            mode: if granted {
+                "AccessExclusiveLock".to_string()
+            } else {
+                "AccessShareLock".to_string()
+            },
+            granted,
+            object: object.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn locks_export_counts_granted_and_waiting() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 10, 0, 0).unwrap();
+        let locks = vec![
+            lock(101, true, Some("public.orders")),
+            lock(102, false, Some("public.orders")),
+            lock(103, false, Some("public.users")),
+        ];
+        let json = render_locks_json(&locks, Some("prod"), now).unwrap();
+        assert!(json.contains("\"exported_count\": 3"));
+        assert!(json.contains("\"granted_count\": 1"));
+        assert!(json.contains("\"waiting_count\": 2"));
+        assert!(json.contains("\"pid\": 101"));
+        assert!(json.contains("\"object\": \"public.orders\""));
+    }
+
+    #[test]
+    fn locks_export_handles_empty_object() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 10, 0, 0).unwrap();
+        let locks = vec![Lock {
+            pid: 1,
+            locktype: "transactionid".to_string(),
+            mode: "ExclusiveLock".to_string(),
+            granted: true,
+            object: None,
+        }];
+        let json = render_locks_json(&locks, None, now).unwrap();
+        assert!(json.contains("\"object\": null"));
+        assert!(json.contains("\"locktype\": \"transactionid\""));
     }
 }

@@ -7,7 +7,7 @@
 //! `datname = "the_bridge"`, and pids in the 90000–99999 range (well above
 //! what Postgres typically hands out).
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
@@ -15,6 +15,54 @@ use chrono::Utc;
 use crate::db::{Backend, TopQuery};
 
 static ENABLED: OnceLock<bool> = OnceLock::new();
+
+/// How long a single lyric stays visible once it appears, in collector
+/// ticks. For Activity (1s tick) this is 10 seconds; for Top Queries
+/// (10s tick) it's about 100 seconds. Either way: long enough for the
+/// careful reader to notice and pause.
+const STICKY_TTL: u32 = 10;
+
+/// Currently-displayed lyric and the number of ticks remaining. While
+/// the entry is `Some`, every subsequent injection call returns the
+/// same lyric; once `remaining` hits zero the slot is cleared and the
+/// next call starts rolling for a fresh hit. Separate slots for the
+/// two surfaces because their tickers run at different rates.
+static STICKY_BACKEND: Mutex<Sticky> = Mutex::new(Sticky::new());
+static STICKY_TOP: Mutex<Sticky> = Mutex::new(Sticky::new());
+
+struct Sticky {
+    inner: Option<(&'static str, u32)>,
+}
+
+impl Sticky {
+    const fn new() -> Self {
+        Self { inner: None }
+    }
+
+    /// One tick. If a lyric is still alive, return it and decrement.
+    /// Otherwise call `roll` to maybe start a fresh run with `ttl`
+    /// total ticks.
+    fn next(
+        &mut self,
+        roll: impl FnOnce() -> Option<&'static str>,
+        ttl: u32,
+    ) -> Option<&'static str> {
+        if let Some((v, remaining)) = self.inner {
+            if remaining > 1 {
+                self.inner = Some((v, remaining - 1));
+                return Some(v);
+            }
+            // expired
+            self.inner = None;
+        }
+        if let Some(v) = roll() {
+            self.inner = Some((v, ttl));
+            Some(v)
+        } else {
+            None
+        }
+    }
+}
 
 /// Set once at startup. Subsequent calls are silently ignored.
 pub fn init(enabled: bool) {
@@ -76,13 +124,22 @@ fn one_in(n: u32) -> bool {
     pseudo_random_u32().is_multiple_of(n)
 }
 
-/// Maybe append a fake backend with lyrics. No-op when the egg is off.
-/// Default firing rate: ~5% per call.
+/// Maybe append a fake backend with lyrics. Once a lyric "lights up"
+/// it stays for `STICKY_TTL` ticks so the reader has time to actually
+/// see it. Roll rate is set so total visible share is roughly 20%
+/// (10 visible ticks out of 50-tick average cycle).
 pub fn maybe_inject_backend(backends: &mut Vec<Backend>) {
-    if !enabled() || !one_in(20) {
+    if !enabled() {
         return;
     }
-    let lyric = pick_lyric();
+    let lyric = {
+        let mut slot = STICKY_BACKEND.lock().expect("sticky lock poisoned");
+        slot.next(
+            || if one_in(40) { Some(pick_lyric()) } else { None },
+            STICKY_TTL,
+        )
+    };
+    let Some(lyric) = lyric else { return };
     let now = Utc::now();
     backends.push(Backend {
         pid: lyric_pid(lyric),
@@ -104,16 +161,27 @@ pub fn maybe_inject_backend(backends: &mut Vec<Backend>) {
     });
 }
 
-/// Maybe append a fake top query. Lower rate (~1 in 30) because Top
-/// Queries is read more carefully than the live Activity churn.
+/// Maybe append a fake top query. Same sticky behaviour as
+/// `maybe_inject_backend`, lower roll rate because Top Queries is
+/// surveyed less often.
 pub fn maybe_inject_top_query(queries: &mut Vec<TopQuery>) {
-    if !enabled() || !one_in(30) {
+    if !enabled() {
         return;
     }
-    let lyric = pick_lyric();
-    // Plausible-looking numbers — not zero, not absurd.
-    let calls = 1000 + (pseudo_random_u32() % 9000) as i64;
-    let mean = 0.5 + (pseudo_random_u32() % 200) as f64 / 100.0;
+    let lyric = {
+        let mut slot = STICKY_TOP.lock().expect("sticky lock poisoned");
+        slot.next(
+            || if one_in(50) { Some(pick_lyric()) } else { None },
+            STICKY_TTL,
+        )
+    };
+    let Some(lyric) = lyric else { return };
+    // Plausible-looking numbers — not zero, not absurd. Computed once
+    // per appearance is good enough; we don't need them to evolve over
+    // the sticky window.
+    let h = lyric_pid(lyric) as u32;
+    let calls = 1000 + (h % 9000) as i64;
+    let mean = 0.5 + (h % 200) as f64 / 100.0;
     let total = mean * calls as f64;
     queries.push(TopQuery {
         query: lyric.to_string(),
@@ -146,5 +214,46 @@ mod tests {
         let b = lyric_pid("In the end, it doesn't even matter");
         assert_eq!(a, b);
         assert!((90000..100000).contains(&a));
+    }
+
+    #[test]
+    fn sticky_holds_for_ttl_ticks_then_clears() {
+        let mut s = Sticky::new();
+
+        // First call: roll succeeds → start sticky window.
+        let first = s.next(|| Some("L1"), 3);
+        assert_eq!(first, Some("L1"));
+
+        // Two more ticks return the same lyric without rolling.
+        // The closure must not run; if it does we'd see "L2".
+        let mut rolled = false;
+        assert_eq!(
+            s.next(
+                || {
+                    rolled = true;
+                    Some("L2")
+                },
+                3
+            ),
+            Some("L1")
+        );
+        assert!(!rolled, "should not roll while sticky is alive");
+
+        assert_eq!(s.next(|| Some("L2"), 3), Some("L1"));
+
+        // Window expired. The next call rolls again. None → no lyric.
+        assert_eq!(s.next(|| None, 3), None);
+
+        // …and a subsequent successful roll starts a fresh window.
+        assert_eq!(s.next(|| Some("L3"), 3), Some("L3"));
+        assert_eq!(s.next(|| Some("L4"), 3), Some("L3"));
+    }
+
+    #[test]
+    fn sticky_skips_when_roll_returns_none() {
+        let mut s = Sticky::new();
+        for _ in 0..5 {
+            assert_eq!(s.next(|| None, 3), None);
+        }
     }
 }

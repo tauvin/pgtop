@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-05-13
+
+### Changed
+
+- The hidden lyric mode now keeps a single line visible for several
+  ticks once it appears, instead of flashing for one frame. Roll
+  rates lowered to compensate.
+
 ## [0.2.1] — 2026-05-13
 
 ### Added
@@ -448,7 +456,8 @@ Initial release.
   before background tasks are awaited so the user doesn't see a frozen
   frame during teardown.
 
-[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/tauvin/pgtop/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/tauvin/pgtop/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/tauvin/pgtop/compare/v0.1.10...v0.2.0
 [0.1.10]: https://github.com/tauvin/pgtop/compare/v0.1.9...v0.1.10

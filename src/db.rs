@@ -172,9 +172,17 @@ fn make_connector(mode: VerifyMode) -> MakeRustlsConnect {
 }
 
 fn webpki_roots_store() -> Arc<RootCertStore> {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    Arc::new(roots)
+    // The bundled Mozilla root store is identical for the lifetime of the
+    // process — cache it after the first build so every collector's first
+    // connect doesn't re-walk webpki_roots::TLS_SERVER_ROOTS.
+    static STORE: std::sync::OnceLock<Arc<RootCertStore>> = std::sync::OnceLock::new();
+    STORE
+        .get_or_init(|| {
+            let mut roots = RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            Arc::new(roots)
+        })
+        .clone()
 }
 
 fn verifying_tls_config() -> ClientConfig {

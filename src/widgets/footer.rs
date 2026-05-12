@@ -10,6 +10,9 @@ use ratatui::{
 
 use crate::app::{App, Mode, Tab};
 
+/// Separator between hint groups in the footer.
+const SEP: &str = "  ·  ";
+
 pub fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let multi_conn = app.connections.len() > 1;
     let line = match &app.mode {
@@ -70,12 +73,12 @@ fn normal_hints(tab: Tab, actions_allowed: bool, multi_conn: bool) -> Line<'stat
     ];
 
     if multi_conn {
-        spans.extend([Span::raw("  ·  "), "Alt+N".bold(), Span::raw(" conn")]);
+        spans.extend([Span::raw(SEP), "Alt+N".bold(), Span::raw(" conn")]);
     }
 
     if tab == Tab::Activity {
         spans.extend([
-            Span::raw("  ·  "),
+            Span::raw(SEP),
             "Enter".bold(),
             Span::raw(" details  ·  "),
             "/".bold(),
@@ -92,16 +95,16 @@ fn normal_hints(tab: Tab, actions_allowed: bool, multi_conn: bool) -> Line<'stat
 
         if actions_allowed {
             spans.extend([
-                Span::raw("  ·  "),
+                Span::raw(SEP),
                 "c".bold().yellow(),
                 Span::raw(" cancel").yellow(),
-                Span::raw("  ·  "),
+                Span::raw(SEP),
                 "K".bold().red(),
                 Span::raw(" terminate").red(),
             ]);
         }
     } else if actions_allowed {
-        spans.extend([Span::raw("  ·  "), "actions".bold().yellow()]);
+        spans.extend([Span::raw(SEP), "actions".bold().yellow()]);
     }
 
     Line::from(spans)

@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Row, Table},
 };
 
-use crate::{app::App, db::Lock, theme::Theme};
+use crate::{app::App, db::Lock, theme::Theme, views::EM_DASH};
 
 /// Render the Locks tab.
 pub fn render_locks(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -45,7 +45,7 @@ fn lock_to_row(l: &Lock, theme: Theme) -> Row<'static> {
         l.locktype.clone(),
         l.mode.clone(),
         granted_marker.to_string(),
-        l.object.clone().unwrap_or_else(em_dash),
+        l.object.clone().unwrap_or_else(|| EM_DASH.to_string()),
     ]);
 
     if l.granted {
@@ -53,8 +53,4 @@ fn lock_to_row(l: &Lock, theme: Theme) -> Row<'static> {
     } else {
         row.style(Style::new().fg(theme.danger))
     }
-}
-
-fn em_dash() -> String {
-    "—".to_string()
 }

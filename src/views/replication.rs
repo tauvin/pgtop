@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Paragraph, Row, Table, TableState, Wrap},
 };
 
-use crate::{app::App, db::Replica};
+use crate::{app::App, db::Replica, views::EM_DASH};
 
 pub fn render_replication(frame: &mut Frame, area: Rect, app: &mut App) {
     let conn = app.active_mut();
@@ -88,7 +88,7 @@ fn format_lag(secs: Option<f64>) -> String {
 }
 
 fn em_dash() -> String {
-    "—".to_string()
+    EM_DASH.to_string()
 }
 
 #[cfg(test)]

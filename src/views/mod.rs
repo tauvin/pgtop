@@ -1,6 +1,10 @@
 //! Per-tab render functions. Each view receives a `Frame`, target `Rect`,
 //! and either `&mut App` or sub-state.
 
+/// Placeholder rendered for a NULL / unavailable cell. Shared across views
+/// so the visual language stays consistent.
+pub(super) const EM_DASH: &str = "—";
+
 pub mod activity;
 pub mod databases;
 pub mod locks;

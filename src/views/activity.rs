@@ -15,9 +15,8 @@ use crate::{
     app::{App, Sort, SortBy},
     db::Backend,
     theme::Theme,
+    views::EM_DASH,
 };
-
-const EM_DASH: &str = "—";
 
 /// Render the Activity tab — a stateful table fed by `ConnectionState`.
 pub fn render_activity(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) {

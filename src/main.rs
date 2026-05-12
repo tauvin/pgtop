@@ -466,7 +466,16 @@ fn handle_confirm_cancel_key(
         KeyCode::Enter => {
             let pid = *pid;
             let active = app.active;
-            let _ = action_txs[active].send(ActionCommand::Cancel { pid });
+            if action_txs[active]
+                .send(ActionCommand::Cancel { pid })
+                .is_err()
+            {
+                tracing::warn!(
+                    conn_idx = active,
+                    pid,
+                    "cancel command dropped: action executor exited"
+                );
+            }
             app.close_modal();
         }
         KeyCode::Esc => app.close_modal(),
@@ -484,8 +493,16 @@ fn handle_confirm_terminate_key(
         KeyCode::Esc => app.close_modal(),
         KeyCode::Enter => {
             let active = app.active;
-            if let Some(pid) = app.try_confirm_terminate() {
-                let _ = action_txs[active].send(ActionCommand::Terminate { pid });
+            if let Some(pid) = app.try_confirm_terminate()
+                && action_txs[active]
+                    .send(ActionCommand::Terminate { pid })
+                    .is_err()
+            {
+                tracing::warn!(
+                    conn_idx = active,
+                    pid,
+                    "terminate command dropped: action executor exited"
+                );
             }
         }
         KeyCode::Backspace => app.terminate_input_backspace(),
@@ -519,6 +536,14 @@ fn init_audit_log() -> Result<LogGuards> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o700));
     }
+
+    // Force any file the appender creates to be born with mode 0o600 by
+    // tightening the process umask. RAII-restore on every exit path,
+    // including panics inside subscriber construction. Without this there
+    // would be a TOCTOU window between tracing_appender opening the file
+    // (default umask, often 0o644) and restrict_log_files chmod-ing it.
+    #[cfg(unix)]
+    let _umask_guard = UmaskGuard::new(0o077);
 
     let app_appender = tracing_appender::rolling::daily(&log_dir, "pgtop.log");
     let (app_writer, app_guard) = tracing_appender::non_blocking(app_appender);
@@ -557,9 +582,36 @@ fn init_audit_log() -> Result<LogGuards> {
     })
 }
 
-/// Tighten permissions to 0600 on every existing pgtop log file. Called
-/// after the appenders create today's files. Idempotent — applies on
-/// every start.
+/// RAII guard that sets `umask` on construction and restores it on drop.
+/// `umask` is per-process global state; the guard ensures the previous
+/// value is restored on every exit path, including panics.
+#[cfg(unix)]
+struct UmaskGuard(libc::mode_t);
+
+#[cfg(unix)]
+impl UmaskGuard {
+    fn new(mask: libc::mode_t) -> Self {
+        // SAFETY: umask is a single libc call with no preconditions on the
+        // argument; the only effect is per-process file-creation mode.
+        let old = unsafe { libc::umask(mask) };
+        Self(old)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        // SAFETY: same as new(); restoring the previous mask is symmetric.
+        unsafe {
+            libc::umask(self.0);
+        }
+    }
+}
+
+/// Tighten permissions to 0600 on every existing pgtop log file. Belt-and-
+/// braces alongside UmaskGuard above: a running pgtop that crosses a day
+/// boundary will create the next day's file with the current umask, so on
+/// a long-lived process the next start will pick those up.
 #[cfg(unix)]
 fn restrict_log_files(log_dir: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;

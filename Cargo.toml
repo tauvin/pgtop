@@ -45,6 +45,9 @@ tui-input = "0.10"
 regex = "1"
 strum = { version = "0.28", features = ["derive"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # cargo-husky прописывает git pre-commit hook в .git/hooks/ при сборке dev-профиля
 # (включая `cargo test`). Конкретные команды лежат в .cargo-husky/hooks/pre-commit;

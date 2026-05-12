@@ -1555,6 +1555,7 @@ dependencies = [
  "figment",
  "futures",
  "insta",
+ "libc",
  "ratatui 0.30.0",
  "regex",
  "rustls",

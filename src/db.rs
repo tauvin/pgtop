@@ -105,7 +105,12 @@ pub async fn connect(dsn: &str) -> Result<Client, DbError> {
         }
     });
 
-    let _ = client.execute("SET application_name = 'pgtop'", &[]).await;
+    // Failure here means our own backends won't be tagged as 'pgtop' and
+    // will appear in the activity table as ordinary connections — surface
+    // it but don't abort the connect, the client is otherwise usable.
+    if let Err(e) = client.execute("SET application_name = 'pgtop'", &[]).await {
+        tracing::warn!(error = %e, "failed to set application_name on new connection");
+    }
 
     Ok(client)
 }
@@ -537,9 +542,12 @@ SELECT
 
 pub async fn fetch_raw_stats(client: &Client) -> Result<RawStats, DbError> {
     let row = client.query_one(STATS_QUERY, &[]).await?;
+    let raw_active: i32 = row.get("active_conns");
     Ok(RawStats {
         xacts: row.get("xacts"),
-        active_connections: row.get::<_, i32>("active_conns") as u32,
+        // COUNT(*) is non-negative by definition, but a defensive
+        // try_into avoids a silent sign-flip if the query ever changes.
+        active_connections: u32::try_from(raw_active).unwrap_or(0),
         cache_hit_pct: row.get("cache_hit_pct"),
     })
 }

@@ -124,6 +124,21 @@ pub fn waits_export_path(profile: Option<&str>, now: DateTime<Utc>) -> PathBuf {
     timestamped_path("waits", profile, now)
 }
 
+pub fn explain_export_path(pid: i32, now: DateTime<Utc>) -> PathBuf {
+    let stamp = now.format("%Y%m%d-%H%M%S");
+    export_dir().join(format!("explain-pid{pid}-{stamp}.txt"))
+}
+
+/// Write an EXPLAIN plan to a timestamped text file. The pid is in the
+/// filename so multiple plans from the same session don't collide.
+pub fn write_explain_plan(pid: i32, plan: &str, now: DateTime<Utc>) -> std::io::Result<PathBuf> {
+    let dir = export_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = explain_export_path(pid, now);
+    std::fs::write(&path, plan)?;
+    Ok(path)
+}
+
 /// Write the snapshot to disk, creating the export dir if needed.
 /// Returns the path on success.
 pub fn write(

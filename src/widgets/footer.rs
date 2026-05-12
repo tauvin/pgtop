@@ -47,7 +47,13 @@ pub fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             "Esc".bold(),
             Span::raw(" abort"),
         ]),
-        Mode::Explain(_) => Line::from(vec![Span::raw(" "), "Esc".bold(), Span::raw(" close")]),
+        Mode::Explain(_) => Line::from(vec![
+            Span::raw(" "),
+            "Esc".bold(),
+            Span::raw(" close  ·  "),
+            "s".bold(),
+            Span::raw(" save plan"),
+        ]),
         Mode::JumpToPid(_) => Line::from(vec![
             Span::raw(" "),
             "Enter".bold(),

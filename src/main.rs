@@ -745,10 +745,30 @@ fn handle_detail_key(app: &mut App, key: KeyEvent) -> ControlFlow<()> {
 }
 
 fn handle_explain_key(app: &mut App, key: KeyEvent) -> ControlFlow<()> {
-    if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
-        app.close_modal();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.close_modal(),
+        KeyCode::Char('s') => save_explain_plan(app),
+        _ => {}
     }
     ControlFlow::Continue(())
+}
+
+/// Save the current EXPLAIN plan (if any) to a timestamped file.
+/// No-op for Loading / Error popup states — there's no plan to save.
+fn save_explain_plan(app: &mut App) {
+    let (pid, plan) = match &app.mode {
+        Mode::Explain(ExplainPopup::Ready { pid, plan }) => (*pid, plan.clone()),
+        _ => return,
+    };
+    let now = chrono::Utc::now();
+    let notice = match export::write_explain_plan(pid, &plan, now) {
+        Ok(path) => format!("Saved EXPLAIN for pid {pid} to {}", path.display()),
+        Err(e) => {
+            tracing::warn!(error = %e, pid, "EXPLAIN save failed");
+            format!("EXPLAIN save failed: {e}")
+        }
+    };
+    app.active_mut().last_notice = Some(notice);
 }
 
 fn handle_jump_key(app: &mut App, key: KeyEvent) -> ControlFlow<()> {

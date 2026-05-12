@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use rustls::ClientConfig;
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -133,15 +134,27 @@ pub enum VerifyMode {
 /// tokio-postgres 0.7 rejects `sslmode=verify-{ca,full}` at parse time. We
 /// translate them to `sslmode=require` and let the caller pick the
 /// matching verifier through the connector.
+///
+/// A naïve `dsn.contains("sslmode=verify-...")` would also match the
+/// literal text occurring elsewhere in the DSN (e.g. inside a password
+/// or `application_name`), which could either downgrade verification or
+/// upgrade it incorrectly. A word-boundaried regex constrains the match
+/// to a real key/value pair. Full DSN parsing remains deferred.
 fn rewrite_verify_sslmode(dsn: &str) -> (String, VerifyMode) {
-    if dsn.contains("sslmode=verify-full") {
+    use std::sync::LazyLock;
+
+    static FULL_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\bsslmode=verify-full\b").unwrap());
+    static CA_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bsslmode=verify-ca\b").unwrap());
+
+    if FULL_RE.is_match(dsn) {
         (
-            dsn.replace("sslmode=verify-full", "sslmode=require"),
+            FULL_RE.replace_all(dsn, "sslmode=require").into_owned(),
             VerifyMode::Full,
         )
-    } else if dsn.contains("sslmode=verify-ca") {
+    } else if CA_RE.is_match(dsn) {
         (
-            dsn.replace("sslmode=verify-ca", "sslmode=require"),
+            CA_RE.replace_all(dsn, "sslmode=require").into_owned(),
             VerifyMode::ChainOnly,
         )
     } else {
@@ -748,5 +761,15 @@ mod tests {
             rewrite_verify_sslmode("postgres://h/d?sslmode=verify-full&backup=verify-ca");
         assert!(cleaned.contains("sslmode=require"));
         assert_eq!(mode, VerifyMode::Full);
+    }
+
+    #[test]
+    fn rewrite_verify_sslmode_ignores_password_substrings() {
+        // Password contains the literal 'verify-ca' as a substring. Naïve
+        // string-contains would have downgraded the verification level.
+        let dsn = "postgres://u:my_verify-ca_pw@h/d?sslmode=require";
+        let (cleaned, mode) = rewrite_verify_sslmode(dsn);
+        assert_eq!(cleaned, dsn);
+        assert_eq!(mode, VerifyMode::None);
     }
 }

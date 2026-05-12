@@ -89,23 +89,32 @@ impl Intervals {
     fn from_config(cfg: &IntervalsConfig) -> Self {
         let d = Self::default();
         Self {
-            activity: cfg.activity.map(Duration::from_secs).unwrap_or(d.activity),
-            locks: cfg.locks.map(Duration::from_secs).unwrap_or(d.locks),
-            top_queries: cfg
-                .top_queries
-                .map(Duration::from_secs)
-                .unwrap_or(d.top_queries),
-            replication: cfg
-                .replication
-                .map(Duration::from_secs)
-                .unwrap_or(d.replication),
-            stats: cfg.stats.map(Duration::from_secs).unwrap_or(d.stats),
-            databases: cfg
-                .databases
-                .map(Duration::from_secs)
-                .unwrap_or(d.databases),
-            tables: cfg.tables.map(Duration::from_secs).unwrap_or(d.tables),
+            activity: resolve_interval("activity", cfg.activity, d.activity),
+            locks: resolve_interval("locks", cfg.locks, d.locks),
+            top_queries: resolve_interval("top_queries", cfg.top_queries, d.top_queries),
+            replication: resolve_interval("replication", cfg.replication, d.replication),
+            stats: resolve_interval("stats", cfg.stats, d.stats),
+            databases: resolve_interval("databases", cfg.databases, d.databases),
+            tables: resolve_interval("tables", cfg.tables, d.tables),
         }
+    }
+}
+
+/// Convert a TOML interval value (seconds) into a `Duration`, falling back
+/// to the default on `None` or zero. Zero would cause `tokio::time::interval`
+/// to fire immediately on every tick, busy-looping the runtime and
+/// hammering Postgres — so we log a warning and use the default instead.
+fn resolve_interval(name: &str, value: Option<u64>, default: Duration) -> Duration {
+    match value {
+        None => default,
+        Some(0) => {
+            tracing::warn!(
+                "config intervals.{name} = 0 is invalid (would busy-loop); using default {:?}",
+                default
+            );
+            default
+        }
+        Some(secs) => Duration::from_secs(secs),
     }
 }
 

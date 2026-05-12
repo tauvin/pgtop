@@ -19,6 +19,7 @@ mod app;
 mod collectors;
 mod config;
 mod db;
+mod diff;
 mod explain;
 mod export;
 mod messages;
@@ -144,10 +145,8 @@ async fn run_replay(file: &std::path::Path) -> Result<()> {
     loop_result
 }
 
-fn run_diff(_a: &std::path::Path, _b: &std::path::Path, _json: bool) -> Result<()> {
-    Err(color_eyre::eyre::eyre!(
-        "pgtop diff is not implemented yet (step 5 of the 0.2.0 plan)"
-    ))
+fn run_diff(a: &std::path::Path, b: &std::path::Path, json: bool) -> Result<()> {
+    diff::run(a, b, json).map_err(|e| color_eyre::eyre::eyre!("{e}"))
 }
 
 async fn run_live(cli: Cli) -> Result<()> {

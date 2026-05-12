@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-05-12
+
+Cleanup release driven by a second three-reviewer pass over the
+codebase (rust-engineer, code-quality, code-simplifier). Surfaces a
+handful of silent failures, simplifies the most repetitive code, and
+hardens a few low-risk-but-real edges.
+
+### Security / robustness
+
+- **`sslmode=verify-ca/-full` rewrite is now word-boundaried.** Was a
+  naïve substring match: a DSN whose password or `application_name`
+  happened to contain the literal `verify-ca` could be silently
+  downgraded. Now uses a `\bsslmode=verify-(ca|full)\b` regex. Full
+  DSN parsing remains deferred.
+- **Audit log creation is TOCTOU-safe.** Process umask is tightened to
+  `0o077` for the duration of `init_audit_log` via a RAII guard, so
+  `tracing_appender` creates today's file with mode `0o600` from the
+  start — no longer a window where the file is world-readable while
+  `restrict_log_files` catches up.
+- **EXPLAIN rejects multi-statement / truncated queries.** The query
+  text comes from `pg_stat_activity.query`, so it can be malformed
+  (truncated mid-statement, two statements joined). `sanitize_for_explain`
+  strips a trailing `;` and refuses anything with an inner `;`.
+- **`intervals.X = 0` no longer busy-loops.** Zero-second config values
+  now fall back to the default with a `warn!` log instead of pinning a
+  CPU and hammering Postgres.
+
+### Surface silent failures
+
+- **`SET application_name = 'pgtop'`** failures are now logged at
+  `warn` instead of `let _ = ...` — without that, `is_self()` returns
+  false for our own connections and they appear in the Activity table.
+- **Action command `send`** failures (cancel/terminate dropped because
+  the executor task exited) are logged at `warn`, so the UI's "no
+  result yet" state isn't completely silent.
+- **`as u32`** lossy cast in `fetch_raw_stats` replaced with
+  `try_from().unwrap_or(0)`. Defence against the SQL changing — today
+  the column is non-negative by construction.
+
+### Simplifications (internal)
+
+- **`select_previous` / `select_next`** in `ConnectionState` collapsed
+  from ~160 lines of per-tab match arms to ~25 via a `tab_table(tab) ->
+  Option<(&mut TableState, usize)>` router.
+- **Four pure collectors** (locks, replication, tables, top_queries)
+  now wrap a generic `run_simple_collector<F, T>` driver via
+  `AsyncFn(&Client) -> Result<T, DbError>`. ~200 lines removed.
+  Activity/databases/stats keep bespoke loops because of state hooks.
+- **`recompute_filtered`** uses the existing `clamp_table_state`
+  helper instead of inlining the same four-arm match.
+- **`stats` collector** consolidates `prev_xacts`/`prev_time` into one
+  `Option<(i64, Instant)>` — eliminates an implicit "update together"
+  invariant.
+- **`maybe_close_dead_modal`** merges three pid-bearing `Mode` arms
+  into one.
+
+### Polish
+
+- `Cargo.toml`: `tokio = "full"` → explicit features
+  (`rt-multi-thread`, `macros`, `signal`, `sync`, `time`).
+- `views/EM_DASH` shared `&'static str` consolidates three local
+  `em_dash() -> String` helpers.
+- `webpki_roots_store` cached in a `OnceLock<Arc<RootCertStore>>` —
+  was rebuilt from `TLS_SERVER_ROOTS` on every connect.
+- Footer separator constant.
+
+### Tests / CI
+
+- 5 new tests (4 for `sanitize_for_explain`, 1 for the password-
+  substring case of `rewrite_verify_sslmode`). Total: 71.
+
 ## [0.1.6] — 2026-05-11
 
 Phase 13 internal refactor release driven by the architect's
@@ -256,7 +327,8 @@ Initial release.
   before background tasks are awaited so the user doesn't see a frozen
   frame during teardown.
 
-[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/tauvin/pgtop/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/tauvin/pgtop/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/tauvin/pgtop/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/tauvin/pgtop/compare/v0.1.3...v0.1.4

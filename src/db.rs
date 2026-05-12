@@ -434,6 +434,11 @@ pub enum TopQueriesSnapshot {
     Available(Vec<TopQuery>),
 }
 
+// `<insufficient privilege>` is the literal Postgres puts in the query
+// column for backends the calling role can't see (no pg_read_all_stats /
+// not the owner). These rows aggregate every hidden statement and so
+// often dominate the top by total_exec_time without telling the user
+// anything actionable — filter them out at the source.
 const TOP_QUERIES_QUERY: &str = "
 SELECT
     query,
@@ -442,6 +447,8 @@ SELECT
     mean_exec_time  AS mean_ms,
     rows
 FROM pg_stat_statements
+WHERE query IS NOT NULL
+  AND query <> '<insufficient privilege>'
 ORDER BY total_exec_time DESC
 LIMIT 50
 ";

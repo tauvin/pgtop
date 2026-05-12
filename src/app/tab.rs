@@ -50,8 +50,13 @@ impl Tab {
         Self::iter().nth(i)
     }
 
-    pub fn count() -> usize {
-        Self::iter().count()
+    /// Next tab in declaration order, wrapping around from the last back
+    /// to the first. Panic-free: returns `self` if the iterator is empty
+    /// (compile-time impossible — kept as a defensive fallback).
+    pub fn cycle_next(self) -> Self {
+        let mut it = Self::iter().cycle().skip_while(|&t| t != self);
+        it.next();
+        it.next().unwrap_or(self)
     }
 
     /// Stable string id used for persisted UI state.

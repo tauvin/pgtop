@@ -1,7 +1,5 @@
 //! Header sparklines: TPS, active connections, cache hit %.
 
-use std::collections::VecDeque;
-
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -84,9 +82,4 @@ fn render_cache_hit(frame: &mut Frame, area: Rect, history: &StatsHistory) {
         .style(Style::new().fg(Color::Green));
 
     frame.render_widget(sparkline, area);
-}
-
-#[allow(dead_code)]
-pub(super) fn _to_u64<T: Copy + Into<u64>>(buf: &VecDeque<T>) -> Vec<u64> {
-    buf.iter().copied().map(|v| v.into()).collect()
 }

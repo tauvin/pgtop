@@ -55,11 +55,17 @@ impl TerminalGuard {
     }
 
     fn install_panic_hook() {
-        let original = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let _ = restore_disciplines();
-            original(info);
-        }));
+        // `Once` guards against repeated installation if `TerminalGuard::new`
+        // is called more than once in a process: without it each call would
+        // wrap the previous hook into a new closure and chain them.
+        static HOOK: std::sync::Once = std::sync::Once::new();
+        HOOK.call_once(|| {
+            let original = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                let _ = restore_disciplines();
+                original(info);
+            }));
+        });
     }
 }
 

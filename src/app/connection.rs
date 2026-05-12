@@ -72,10 +72,7 @@ impl Default for ConnectionStatus {
 }
 
 /// Per-connection state: identity, health, and tab-specific data.
-#[allow(dead_code)]
 pub struct ConnectionState {
-    /// Display name (usually the profile name; "default" otherwise).
-    pub name: String,
     pub dsn: String,
     pub read_only: bool,
     pub actions_allowed: bool,
@@ -131,7 +128,6 @@ pub struct WaitRow {
 
 impl ConnectionState {
     pub fn new(
-        name: String,
         dsn: String,
         read_only: bool,
         actions_allowed: bool,
@@ -139,7 +135,6 @@ impl ConnectionState {
         slow_query_threshold: std::time::Duration,
     ) -> Self {
         Self {
-            name,
             dsn,
             read_only,
             actions_allowed,
@@ -739,7 +734,6 @@ mod tests {
 
     fn conn() -> ConnectionState {
         ConnectionState::new(
-            "t".into(),
             "".into(),
             false,
             false,

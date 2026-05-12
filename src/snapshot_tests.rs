@@ -22,7 +22,6 @@ fn fixed_now() -> DateTime<Utc> {
 
 fn make_conn() -> ConnectionState {
     ConnectionState::new(
-        "test".to_string(),
         "postgres://test".to_string(),
         false,
         false,

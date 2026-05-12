@@ -76,14 +76,12 @@ impl App {
         &mut self.connections[self.active]
     }
 
-    #[allow(dead_code)]
     pub fn connection_mut(&mut self, idx: usize) -> Option<&mut ConnectionState> {
         self.connections.get_mut(idx)
     }
 
     /// Set the active connection by index. Out-of-bounds is a no-op.
     /// Resets `Mode` to `Normal`, cancelling any in-flight EXPLAIN.
-    #[allow(dead_code)]
     pub fn set_active(&mut self, idx: usize) {
         if idx < self.connections.len() && idx != self.active {
             self.active = idx;
@@ -318,7 +316,6 @@ impl App {
     }
 
     pub fn next_tab(&mut self) {
-        let next = (self.current_tab.index() + 1) % Tab::count();
-        self.current_tab = Tab::from_index(next).unwrap();
+        self.current_tab = self.current_tab.cycle_next();
     }
 }

@@ -110,13 +110,7 @@ async fn main() -> Result<()> {
     let mut handles = Vec::new();
 
     for (idx, resolved) in resolveds.iter().enumerate() {
-        let name = resolved
-            .profile_name
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
-
         connections.push(ConnectionState::new(
-            name,
             resolved.dsn.clone(),
             resolved.read_only,
             resolved.actions_allowed,

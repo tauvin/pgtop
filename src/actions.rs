@@ -2,7 +2,6 @@
 //! commands on a dedicated Postgres connection. All events are logged via
 //! `tracing` with `target: "audit"`.
 
-use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 use tokio_postgres::Client;
 use tokio_util::sync::CancellationToken;
@@ -45,8 +44,6 @@ impl ActionCommand {
 pub struct ActionResult {
     pub command: ActionCommand,
     pub outcome: Result<bool, String>,
-    #[allow(dead_code)]
-    pub at: DateTime<Utc>,
 }
 
 /// Run the action executor on a spawned task. Owns its connection: connects
@@ -86,7 +83,6 @@ pub async fn run_action_executor(
         let result = ActionResult {
             command: cmd,
             outcome,
-            at: Utc::now(),
         };
 
         if update_tx

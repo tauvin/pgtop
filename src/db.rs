@@ -451,6 +451,10 @@ fn row_to_top_query(row: Row) -> TopQuery {
 }
 
 /// One row from `pg_stat_replication` — a streaming replication client.
+/// The view only renders a subset of fields (`application_name`,
+/// `sync_state`, `replay_lag_secs`); the rest are still selected and
+/// kept on the struct so adding columns to the view doesn't require a
+/// schema change to the SQL.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Replica {

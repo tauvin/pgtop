@@ -10,7 +10,7 @@ use ratatui::{
 
 use ratatui::style::Style;
 
-use crate::actions::{ActionCommand, ActionResult};
+use crate::actions::ActionResult;
 use crate::app::{App, Mode};
 use crate::theme::Theme;
 
@@ -82,6 +82,3 @@ fn action_result_line(result: &ActionResult, theme: Theme) -> Line<'static> {
         Span::styled(msg, Style::new().fg(color)),
     ])
 }
-
-#[allow(dead_code)]
-fn _force_action_command_use(_: &ActionCommand) {}

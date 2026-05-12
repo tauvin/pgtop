@@ -185,13 +185,7 @@ impl ConnectionState {
             }
         });
 
-        let len = self.filtered.len();
-        match self.table_state.selected() {
-            _ if len == 0 => self.table_state.select(None),
-            Some(i) if i >= len => self.table_state.select(Some(len - 1)),
-            None => self.table_state.select(Some(0)),
-            Some(_) => {}
-        }
+        clamp_table_state(&mut self.table_state, self.filtered.len());
     }
 
     pub fn set_backends(&mut self, backends: Vec<Backend>) {
@@ -270,162 +264,42 @@ impl ConnectionState {
     }
 
     pub fn select_previous(&mut self, tab: Tab) {
-        match tab {
-            Tab::Activity => {
-                if self.filtered.is_empty() {
-                    return;
-                }
-                let i = self
-                    .table_state
-                    .selected()
-                    .map_or(0, |i| i.saturating_sub(1));
-                self.table_state.select(Some(i));
-            }
-            Tab::Locks => {
-                if self.locks.is_empty() {
-                    return;
-                }
-                let i = self
-                    .locks_table_state
-                    .selected()
-                    .map_or(0, |i| i.saturating_sub(1));
-                self.locks_table_state.select(Some(i));
-            }
-            Tab::TopQueries => {
-                let TopQueriesSnapshot::Available(queries) = &self.top_queries else {
-                    return;
-                };
-                if queries.is_empty() {
-                    return;
-                }
-                let i = self
-                    .top_queries_table_state
-                    .selected()
-                    .map_or(0, |i| i.saturating_sub(1));
-                self.top_queries_table_state.select(Some(i));
-            }
-            Tab::Replication => {
-                if self.replication.is_empty() {
-                    return;
-                }
-                let i = self
-                    .replication_table_state
-                    .selected()
-                    .map_or(0, |i| i.saturating_sub(1));
-                self.replication_table_state.select(Some(i));
-            }
-            Tab::Databases => {
-                if self.databases.is_empty() {
-                    return;
-                }
-                let i = self
-                    .databases_table_state
-                    .selected()
-                    .map_or(0, |i| i.saturating_sub(1));
-                self.databases_table_state.select(Some(i));
-            }
-            Tab::Tables => {
-                if self.tables.is_empty() {
-                    return;
-                }
-                let i = self
-                    .tables_table_state
-                    .selected()
-                    .map_or(0, |i| i.saturating_sub(1));
-                self.tables_table_state.select(Some(i));
-            }
-            Tab::Waits => {
-                if self.waits.is_empty() {
-                    return;
-                }
-                let i = self
-                    .waits_table_state
-                    .selected()
-                    .map_or(0, |i| i.saturating_sub(1));
-                self.waits_table_state.select(Some(i));
-            }
+        if let Some((state, len)) = self.tab_table(tab)
+            && len > 0
+        {
+            let i = state.selected().map_or(0, |i| i.saturating_sub(1));
+            state.select(Some(i));
         }
     }
 
     pub fn select_next(&mut self, tab: Tab) {
+        if let Some((state, len)) = self.tab_table(tab)
+            && len > 0
+        {
+            let max = len - 1;
+            let i = state.selected().map_or(0, |i| (i + 1).min(max));
+            state.select(Some(i));
+        }
+    }
+
+    /// Per-tab routing to the `(TableState, row_count)` pair. `None` for
+    /// tabs whose data isn't `Available` yet (TopQueries on a server
+    /// without `pg_stat_statements`).
+    fn tab_table(&mut self, tab: Tab) -> Option<(&mut TableState, usize)> {
         match tab {
-            Tab::Activity => {
-                if self.filtered.is_empty() {
-                    return;
+            Tab::Activity => Some((&mut self.table_state, self.filtered.len())),
+            Tab::Locks => Some((&mut self.locks_table_state, self.locks.len())),
+            Tab::TopQueries => match &self.top_queries {
+                TopQueriesSnapshot::Available(queries) => {
+                    let len = queries.len();
+                    Some((&mut self.top_queries_table_state, len))
                 }
-                let max = self.filtered.len() - 1;
-                let i = self.table_state.selected().map_or(0, |i| (i + 1).min(max));
-                self.table_state.select(Some(i));
-            }
-            Tab::Locks => {
-                if self.locks.is_empty() {
-                    return;
-                }
-                let max = self.locks.len() - 1;
-                let i = self
-                    .locks_table_state
-                    .selected()
-                    .map_or(0, |i| (i + 1).min(max));
-                self.locks_table_state.select(Some(i));
-            }
-            Tab::TopQueries => {
-                let TopQueriesSnapshot::Available(queries) = &self.top_queries else {
-                    return;
-                };
-                if queries.is_empty() {
-                    return;
-                }
-                let max = queries.len() - 1;
-                let i = self
-                    .top_queries_table_state
-                    .selected()
-                    .map_or(0, |i| (i + 1).min(max));
-                self.top_queries_table_state.select(Some(i));
-            }
-            Tab::Replication => {
-                if self.replication.is_empty() {
-                    return;
-                }
-                let max = self.replication.len() - 1;
-                let i = self
-                    .replication_table_state
-                    .selected()
-                    .map_or(0, |i| (i + 1).min(max));
-                self.replication_table_state.select(Some(i));
-            }
-            Tab::Databases => {
-                if self.databases.is_empty() {
-                    return;
-                }
-                let max = self.databases.len() - 1;
-                let i = self
-                    .databases_table_state
-                    .selected()
-                    .map_or(0, |i| (i + 1).min(max));
-                self.databases_table_state.select(Some(i));
-            }
-            Tab::Tables => {
-                if self.tables.is_empty() {
-                    return;
-                }
-                let max = self.tables.len() - 1;
-                let i = self
-                    .tables_table_state
-                    .selected()
-                    .map_or(0, |i| (i + 1).min(max));
-                self.tables_table_state.select(Some(i));
-            }
-            Tab::Waits => {
-                if self.waits.is_empty() {
-                    return;
-                }
-                let max = self.waits.len() - 1;
-                let i = self
-                    .waits_table_state
-                    .selected()
-                    .map_or(0, |i| (i + 1).min(max));
-                self.waits_table_state.select(Some(i));
-            }
+                _ => None,
+            },
+            Tab::Replication => Some((&mut self.replication_table_state, self.replication.len())),
+            Tab::Databases => Some((&mut self.databases_table_state, self.databases.len())),
+            Tab::Tables => Some((&mut self.tables_table_state, self.tables.len())),
+            Tab::Waits => Some((&mut self.waits_table_state, self.waits.len())),
         }
     }
 

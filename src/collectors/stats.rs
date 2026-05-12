@@ -29,8 +29,7 @@ pub async fn run_stats_collector(
         let mut ticker = interval(poll_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        let mut prev_xacts: Option<i64> = None;
-        let mut prev_time: Option<Instant> = None;
+        let mut prev: Option<(i64, Instant)> = None;
 
         loop {
             tokio::select! {
@@ -64,8 +63,8 @@ pub async fn run_stats_collector(
             };
 
             let now = Instant::now();
-            let tps = match (prev_xacts, prev_time) {
-                (Some(prev_x), Some(prev_t)) => {
+            let tps = match prev {
+                Some((prev_x, prev_t)) => {
                     let dt = now.duration_since(prev_t).as_secs_f64();
                     if dt > 0.0 {
                         ((raw.xacts - prev_x) as f64 / dt).max(0.0)
@@ -73,11 +72,9 @@ pub async fn run_stats_collector(
                         0.0
                     }
                 }
-                _ => 0.0,
+                None => 0.0,
             };
-
-            prev_xacts = Some(raw.xacts);
-            prev_time = Some(now);
+            prev = Some((raw.xacts, now));
 
             let snapshot = Stats {
                 tps,

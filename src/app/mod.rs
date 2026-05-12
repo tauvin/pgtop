@@ -116,8 +116,9 @@ impl App {
     /// connection's backends.
     pub fn maybe_close_dead_modal(&mut self) {
         let active_pid = match &self.mode {
-            Mode::Detail(pid) | Mode::ConfirmCancel(pid) => Some(*pid),
-            Mode::ConfirmTerminate(pid, _) => Some(*pid),
+            Mode::Detail(pid) | Mode::ConfirmCancel(pid) | Mode::ConfirmTerminate(pid, _) => {
+                Some(*pid)
+            }
             _ => None,
         };
         if let Some(pid) = active_pid

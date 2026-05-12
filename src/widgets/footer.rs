@@ -92,6 +92,8 @@ fn normal_hints(tab: Tab, actions_allowed: bool, multi_conn: bool) -> Line<'stat
             "g".bold(),
             Span::raw(" jump  ·  "),
             "x".bold(),
+            Span::raw("/"),
+            "X".bold(),
             Span::raw(" export"),
         ]);
 
@@ -106,8 +108,15 @@ fn normal_hints(tab: Tab, actions_allowed: bool, multi_conn: bool) -> Line<'stat
             ]);
         }
     } else {
-        // Every non-Activity tab supports `x` export now.
-        spans.extend([Span::raw(SEP), "x".bold(), Span::raw(" export json")]);
+        // Every non-Activity tab supports `x` (this tab) and `X` (full
+        // session) export.
+        spans.extend([
+            Span::raw(SEP),
+            "x".bold(),
+            Span::raw("/"),
+            "X".bold(),
+            Span::raw(" export"),
+        ]);
         if actions_allowed {
             spans.extend([Span::raw(SEP), "actions".bold().yellow()]);
         }

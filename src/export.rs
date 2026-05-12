@@ -1,10 +1,15 @@
-//! Top Queries snapshot export.
+//! JSON exports for the active connection.
 //!
-//! The Top Queries tab (`pg_stat_statements`) shows a snapshot that's
-//! often worth handing off for further analysis — to a teammate, to a
-//! ticket, or to an LLM. This module serialises the active connection's
-//! snapshot to a self-contained JSON file with a timestamp in its name so
-//! exports never overwrite each other.
+//! Two flavours:
+//! - **Per-tab** writers (`write_top_queries`, `write_activity`, …) dump
+//!   a single tab's data. Triggered by the `x` hotkey, useful when you
+//!   want to look at one slice.
+//! - **Session** writer (`write_session`) bundles every tab plus
+//!   metadata into one file. Triggered by `X`. This is the shape
+//!   `pgtop replay` reads back.
+//!
+//! All exports go under `~/.local/share/pgtop/exports/` with a
+//! timestamped filename so successive exports never collide.
 
 use std::path::PathBuf;
 
@@ -584,6 +589,217 @@ pub fn write_waits(
     Ok(path)
 }
 
+// Session snapshot: every tab in one file.
+
+/// Current schema version of the session export. Bump when the layout
+/// changes so `pgtop replay` can warn about incompatible files.
+pub const SESSION_SCHEMA_VERSION: &str = "0.2";
+
+pub fn session_export_path(profile: Option<&str>, now: DateTime<Utc>) -> PathBuf {
+    timestamped_path("session", profile, now)
+}
+
+/// State of `pg_stat_statements` at snapshot time. Serialised as a
+/// flat enum-like field so `replay` can distinguish "extension is
+/// missing" from "no queries yet" without inspecting the array.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "queries")]
+enum SessionTopQueries<'a> {
+    Loading,
+    ExtensionMissing,
+    Available(Vec<ExportedQuery<'a>>),
+}
+
+#[derive(Serialize)]
+struct SessionPayload<'a> {
+    schema_version: &'static str,
+    generated_at: DateTime<Utc>,
+    profile: Option<&'a str>,
+    /// Tab the user was looking at when the snapshot was taken.
+    /// `replay` opens to the same tab.
+    current_tab: &'a str,
+    /// Filter pattern in effect (Activity tab). `None` if no filter.
+    filter: Option<&'a str>,
+    activity: SessionActivity<'a>,
+    locks: Vec<ExportedLock<'a>>,
+    top_queries: SessionTopQueries<'a>,
+    replication: Vec<ExportedReplica<'a>>,
+    databases: Vec<ExportedDatabase<'a>>,
+    tables: Vec<ExportedTable<'a>>,
+    waits: Vec<ExportedWait<'a>>,
+}
+
+#[derive(Serialize)]
+struct SessionActivity<'a> {
+    /// Total backends in the snapshot (unfiltered).
+    total_count: usize,
+    /// Number of backends shown to the user (after the filter).
+    exported_count: usize,
+    backends: Vec<ExportedBackend<'a>>,
+}
+
+/// Parameters carried into the session export — keeps the call site
+/// from looking like a wall of args.
+pub struct SessionInputs<'a> {
+    pub profile: Option<&'a str>,
+    pub current_tab: &'a str,
+    pub filter: Option<&'a str>,
+    pub backends_all: &'a [Backend],
+    pub backends_filtered: &'a [&'a Backend],
+    pub locks: &'a [Lock],
+    pub top_queries: &'a crate::db::TopQueriesSnapshot,
+    pub replication: &'a [Replica],
+    pub databases: &'a [DatabaseStat],
+    pub tables: &'a [TableStat],
+    pub waits: &'a [WaitRow],
+}
+
+pub fn render_session_json(
+    inputs: &SessionInputs<'_>,
+    now: DateTime<Utc>,
+) -> serde_json::Result<String> {
+    use crate::db::TopQueriesSnapshot;
+
+    let activity = SessionActivity {
+        total_count: inputs.backends_all.len(),
+        exported_count: inputs.backends_filtered.len(),
+        backends: inputs
+            .backends_filtered
+            .iter()
+            .map(|b| to_exported_backend(b, now))
+            .collect(),
+    };
+
+    let locks: Vec<ExportedLock<'_>> = inputs
+        .locks
+        .iter()
+        .map(|l| ExportedLock {
+            pid: l.pid,
+            locktype: &l.locktype,
+            mode: &l.mode,
+            granted: l.granted,
+            object: l.object.as_deref(),
+        })
+        .collect();
+
+    let top_queries = match inputs.top_queries {
+        TopQueriesSnapshot::Loading => SessionTopQueries::Loading,
+        TopQueriesSnapshot::ExtensionMissing => SessionTopQueries::ExtensionMissing,
+        TopQueriesSnapshot::Available(qs) => {
+            let total: f64 = qs.iter().map(|q| q.total_exec_time_ms).sum();
+            let exported: Vec<ExportedQuery<'_>> = qs
+                .iter()
+                .enumerate()
+                .map(|(i, q)| ExportedQuery {
+                    rank: i + 1,
+                    query: &q.query,
+                    calls: q.calls,
+                    total_exec_time_ms: q.total_exec_time_ms,
+                    mean_exec_time_ms: q.mean_exec_time_ms,
+                    rows: q.rows,
+                    share_of_total_time_pct: if total > 0.0 {
+                        100.0 * q.total_exec_time_ms / total
+                    } else {
+                        0.0
+                    },
+                })
+                .collect();
+            SessionTopQueries::Available(exported)
+        }
+    };
+
+    let replication: Vec<ExportedReplica<'_>> = inputs
+        .replication
+        .iter()
+        .map(|r| ExportedReplica {
+            pid: r.pid,
+            application_name: r.application_name.as_deref(),
+            client_addr: r.client_addr.as_deref(),
+            state: r.state.as_deref(),
+            sync_state: r.sync_state.as_deref(),
+            replay_lag_secs: r.replay_lag_secs,
+            sent_lsn: r.sent_lsn.as_deref(),
+            replay_lsn: r.replay_lsn.as_deref(),
+        })
+        .collect();
+
+    let databases: Vec<ExportedDatabase<'_>> = inputs
+        .databases
+        .iter()
+        .map(|d| ExportedDatabase {
+            datname: &d.datname,
+            numbackends: d.numbackends,
+            tps: d.tps,
+            xact_commit: d.xact_commit,
+            xact_rollback: d.xact_rollback,
+            blks_hit: d.blks_hit,
+            blks_read: d.blks_read,
+            cache_hit_pct: d.cache_hit_pct(),
+            temp_bytes: d.temp_bytes,
+            deadlocks: d.deadlocks,
+        })
+        .collect();
+
+    let tables: Vec<ExportedTable<'_>> = inputs
+        .tables
+        .iter()
+        .map(|t| ExportedTable {
+            schemaname: &t.schemaname,
+            relname: &t.relname,
+            n_live_tup: t.n_live_tup,
+            n_dead_tup: t.n_dead_tup,
+            dead_pct: t.dead_pct(),
+            last_vacuum: t.last_vacuum,
+            last_analyze: t.last_analyze,
+            seq_scan: t.seq_scan,
+            idx_scan: t.idx_scan,
+        })
+        .collect();
+
+    let waiting_total: u32 = inputs.waits.iter().map(|w| w.count).sum();
+    let total_f = waiting_total as f64;
+    let waits: Vec<ExportedWait<'_>> = inputs
+        .waits
+        .iter()
+        .map(|w| ExportedWait {
+            wait_event_type: &w.wait_event_type,
+            wait_event: &w.wait_event,
+            count: w.count,
+            share_pct: if total_f > 0.0 {
+                100.0 * w.count as f64 / total_f
+            } else {
+                0.0
+            },
+        })
+        .collect();
+
+    let payload = SessionPayload {
+        schema_version: SESSION_SCHEMA_VERSION,
+        generated_at: now,
+        profile: inputs.profile,
+        current_tab: inputs.current_tab,
+        filter: inputs.filter,
+        activity,
+        locks,
+        top_queries,
+        replication,
+        databases,
+        tables,
+        waits,
+    };
+    serde_json::to_string_pretty(&payload)
+}
+
+pub fn write_session(inputs: &SessionInputs<'_>, now: DateTime<Utc>) -> std::io::Result<PathBuf> {
+    let body = render_session_json(inputs, now)
+        .map_err(|e| std::io::Error::other(format!("serialise session: {e}")))?;
+    let dir = export_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = session_export_path(inputs.profile, now);
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,5 +1062,60 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 5, 12, 10, 0, 0).unwrap();
         let json = render_replication_json(&[], None, now).unwrap();
         assert!(json.contains("\"exported_count\": 0"));
+    }
+
+    #[test]
+    fn session_export_includes_all_tabs_and_schema_version() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 10, 0, 0).unwrap();
+        let backend = empty_backend(1);
+        let backends_all = vec![backend.clone()];
+        let backends_filtered = vec![&backend];
+        let top = crate::db::TopQueriesSnapshot::Available(vec![]);
+        let inputs = SessionInputs {
+            profile: Some("prod"),
+            current_tab: "activity",
+            filter: None,
+            backends_all: &backends_all,
+            backends_filtered: &backends_filtered,
+            locks: &[],
+            top_queries: &top,
+            replication: &[],
+            databases: &[],
+            tables: &[],
+            waits: &[],
+        };
+        let json = render_session_json(&inputs, now).unwrap();
+        assert!(json.contains("\"schema_version\": \"0.2\""));
+        assert!(json.contains("\"current_tab\": \"activity\""));
+        assert!(json.contains("\"profile\": \"prod\""));
+        assert!(json.contains("\"activity\":"));
+        assert!(json.contains("\"locks\":"));
+        assert!(json.contains("\"top_queries\":"));
+        assert!(json.contains("\"replication\":"));
+        assert!(json.contains("\"databases\":"));
+        assert!(json.contains("\"tables\":"));
+        assert!(json.contains("\"waits\":"));
+        assert!(json.contains("\"state\": \"available\""));
+    }
+
+    #[test]
+    fn session_export_serialises_top_queries_state() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 10, 0, 0).unwrap();
+        let top = crate::db::TopQueriesSnapshot::ExtensionMissing;
+        let inputs = SessionInputs {
+            profile: None,
+            current_tab: "top_queries",
+            filter: None,
+            backends_all: &[],
+            backends_filtered: &[],
+            locks: &[],
+            top_queries: &top,
+            replication: &[],
+            databases: &[],
+            tables: &[],
+            waits: &[],
+        };
+        let json = render_session_json(&inputs, now).unwrap();
+        assert!(json.contains("\"state\": \"extension_missing\""));
     }
 }

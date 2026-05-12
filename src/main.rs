@@ -464,9 +464,66 @@ fn handle_normal_key(
             }
         }
         KeyCode::Char('x') => export_current_tab(app),
+        KeyCode::Char('X') => export_session(app),
         _ => {}
     }
     ControlFlow::Continue(())
+}
+
+/// Dump every tab + metadata for the active connection into a single
+/// session-<profile>-<timestamp>.json file. This is what `pgtop replay`
+/// reads back.
+fn export_session(app: &mut App) {
+    let current_tab = app.current_tab.id();
+    let conn = app.active_mut();
+    let filter_pattern = conn
+        .filter
+        .regex
+        .as_ref()
+        .map(|_| conn.filter.input.value().to_string());
+    let backends_all = conn.backends.clone();
+    let filtered_indices = conn.filtered.clone();
+    let locks = conn.locks.clone();
+    let top_queries = conn.top_queries.clone();
+    let replication = conn.replication.clone();
+    let databases = conn.databases.clone();
+    let tables = conn.tables.clone();
+    let waits = conn.waits.clone();
+    let profile = conn.profile_name.clone();
+
+    let backends_filtered: Vec<&db::Backend> = filtered_indices
+        .iter()
+        .filter_map(|&i| backends_all.get(i))
+        .collect();
+
+    let inputs = export::SessionInputs {
+        profile: profile.as_deref(),
+        current_tab,
+        filter: filter_pattern.as_deref(),
+        backends_all: &backends_all,
+        backends_filtered: &backends_filtered,
+        locks: &locks,
+        top_queries: &top_queries,
+        replication: &replication,
+        databases: &databases,
+        tables: &tables,
+        waits: &waits,
+    };
+    let now = chrono::Utc::now();
+    let notice = match export::write_session(&inputs, now) {
+        Ok(path) => format!(
+            "Saved session ({} backends, {} dbs, {} locks) to {}",
+            backends_all.len(),
+            databases.len(),
+            locks.len(),
+            path.display()
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, "session export failed");
+            format!("Session export failed: {e}")
+        }
+    };
+    conn.last_notice = Some(notice);
 }
 
 /// Per-tab `x` dispatch — each tab handles its own snapshot. Tabs

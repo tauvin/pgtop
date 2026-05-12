@@ -11,6 +11,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+use super::try_publish;
 use crate::db::{self, DatabaseStat};
 use crate::messages::UpdateMessage;
 
@@ -21,7 +22,7 @@ type PrevTotals = HashMap<String, (i64, Instant)>;
 
 pub async fn run_databases_collector(
     dsn: String,
-    tx: mpsc::UnboundedSender<UpdateMessage>,
+    tx: mpsc::Sender<UpdateMessage>,
     conn_idx: usize,
     cancel: CancellationToken,
     poll_interval: Duration,
@@ -57,9 +58,13 @@ pub async fn run_databases_collector(
             match result {
                 Ok(mut snapshot) => {
                     fill_tps(&mut snapshot, &mut prev);
-                    if tx
-                        .send(UpdateMessage::Databases { conn_idx, snapshot })
-                        .is_err()
+                    if try_publish(
+                        &tx,
+                        UpdateMessage::Databases { conn_idx, snapshot },
+                        "databases",
+                        conn_idx,
+                    )
+                    .is_break()
                     {
                         return;
                     }

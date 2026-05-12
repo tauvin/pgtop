@@ -127,7 +127,7 @@ async fn run_replay(file: &std::path::Path) -> Result<()> {
     // nothing reads action_txs (Vec is empty so handlers never index),
     // and the explain channel never fires because the replay handler
     // gates EXPLAIN off.
-    let (update_tx, update_rx) = mpsc::unbounded_channel::<UpdateMessage>();
+    let (update_tx, update_rx) = mpsc::channel::<UpdateMessage>(256);
     let cancel = CancellationToken::new();
 
     let mut term = ui::TerminalGuard::new()?;
@@ -182,12 +182,17 @@ async fn run_live(cli: Cli) -> Result<()> {
         "pgtop starting"
     );
 
-    let (update_tx, update_rx) = mpsc::unbounded_channel::<UpdateMessage>();
+    // Bounded channel: every collector publishes here on its own tick.
+    // 256 is generous for 7 collectors × N connections at 1Hz — the UI
+    // drains on every render. On overflow collectors drop newest with a
+    // warn log (try_publish in collectors/mod.rs).
+    let (update_tx, update_rx) = mpsc::channel::<UpdateMessage>(256);
     let cancel = CancellationToken::new();
 
     let mut connections: Vec<ConnectionState> = Vec::with_capacity(resolveds.len());
-    let mut action_txs: Vec<mpsc::UnboundedSender<ActionCommand>> =
-        Vec::with_capacity(resolveds.len());
+    // Action commands are user-initiated (cancel/terminate) — rare and
+    // bursty at worst. Small buffer + try_send keeps us non-blocking.
+    let mut action_txs: Vec<mpsc::Sender<ActionCommand>> = Vec::with_capacity(resolveds.len());
     let mut handles = Vec::new();
 
     for (idx, resolved) in resolveds.iter().enumerate() {
@@ -251,7 +256,7 @@ async fn run_live(cli: Cli) -> Result<()> {
             intervals.tables,
         )));
 
-        let (action_tx, action_rx) = mpsc::unbounded_channel::<ActionCommand>();
+        let (action_tx, action_rx) = mpsc::channel::<ActionCommand>(8);
         handles.push(tokio::spawn(actions::run_action_executor(
             dsn,
             action_rx,
@@ -304,9 +309,9 @@ async fn run_live(cli: Cli) -> Result<()> {
 async fn run_event_loop(
     terminal: &mut ui::Tui,
     app: &mut App,
-    mut update_rx: mpsc::UnboundedReceiver<UpdateMessage>,
-    action_txs: Vec<mpsc::UnboundedSender<ActionCommand>>,
-    update_tx_for_explain: mpsc::UnboundedSender<UpdateMessage>,
+    mut update_rx: mpsc::Receiver<UpdateMessage>,
+    action_txs: Vec<mpsc::Sender<ActionCommand>>,
+    update_tx_for_explain: mpsc::Sender<UpdateMessage>,
     cancel_for_explain: CancellationToken,
 ) -> Result<()> {
     let mut events = EventStream::new();
@@ -450,7 +455,7 @@ async fn run_event_loop(
 fn handle_normal_key(
     app: &mut App,
     key: KeyEvent,
-    update_tx_for_explain: &mpsc::UnboundedSender<UpdateMessage>,
+    update_tx_for_explain: &mpsc::Sender<UpdateMessage>,
     cancel_for_explain: &CancellationToken,
 ) -> ControlFlow<()> {
     match key.code {
@@ -796,7 +801,7 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) -> ControlFlow<()> {
 fn handle_confirm_cancel_key(
     app: &mut App,
     key: KeyEvent,
-    action_txs: &[mpsc::UnboundedSender<ActionCommand>],
+    action_txs: &[mpsc::Sender<ActionCommand>],
 ) -> ControlFlow<()> {
     let Mode::ConfirmCancel(pid) = &app.mode else {
         return ControlFlow::Continue(());
@@ -806,13 +811,13 @@ fn handle_confirm_cancel_key(
             let pid = *pid;
             let active = app.active;
             if action_txs[active]
-                .send(ActionCommand::Cancel { pid })
+                .try_send(ActionCommand::Cancel { pid })
                 .is_err()
             {
                 tracing::warn!(
                     conn_idx = active,
                     pid,
-                    "cancel command dropped: action executor exited"
+                    "cancel command dropped: action executor exited or queue full"
                 );
             }
             app.close_modal();
@@ -826,7 +831,7 @@ fn handle_confirm_cancel_key(
 fn handle_confirm_terminate_key(
     app: &mut App,
     key: KeyEvent,
-    action_txs: &[mpsc::UnboundedSender<ActionCommand>],
+    action_txs: &[mpsc::Sender<ActionCommand>],
 ) -> ControlFlow<()> {
     match key.code {
         KeyCode::Esc => app.close_modal(),
@@ -834,13 +839,13 @@ fn handle_confirm_terminate_key(
             let active = app.active;
             if let Some(pid) = app.try_confirm_terminate()
                 && action_txs[active]
-                    .send(ActionCommand::Terminate { pid })
+                    .try_send(ActionCommand::Terminate { pid })
                     .is_err()
             {
                 tracing::warn!(
                     conn_idx = active,
                     pid,
-                    "terminate command dropped: action executor exited"
+                    "terminate command dropped: action executor exited or queue full"
                 );
             }
         }

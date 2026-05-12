@@ -11,7 +11,7 @@ use crate::messages::UpdateMessage;
 
 pub async fn run_locks_collector(
     dsn: String,
-    tx: mpsc::UnboundedSender<UpdateMessage>,
+    tx: mpsc::Sender<UpdateMessage>,
     conn_idx: usize,
     cancel: CancellationToken,
     poll_interval: Duration,

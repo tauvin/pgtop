@@ -50,8 +50,8 @@ pub struct ActionResult {
 /// with backoff on startup and reconnects on demand if the client closed.
 pub async fn run_action_executor(
     dsn: String,
-    mut commands_rx: mpsc::UnboundedReceiver<ActionCommand>,
-    update_tx: mpsc::UnboundedSender<UpdateMessage>,
+    mut commands_rx: mpsc::Receiver<ActionCommand>,
+    update_tx: mpsc::Sender<UpdateMessage>,
     conn_idx: usize,
     cancel: CancellationToken,
 ) {
@@ -85,8 +85,12 @@ pub async fn run_action_executor(
             outcome,
         };
 
+        // Use send().await for action results — they are rare (user-
+        // initiated cancel/terminate) and we'd rather wait briefly than
+        // silently lose the user's outcome to a transient buffer fill.
         if update_tx
             .send(UpdateMessage::ActionResult { conn_idx, result })
+            .await
             .is_err()
         {
             break;

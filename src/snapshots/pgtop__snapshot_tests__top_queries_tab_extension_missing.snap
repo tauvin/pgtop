@@ -1,0 +1,28 @@
+---
+source: src/snapshot_tests.rs
+expression: render_snapshot(&mut app)
+---
+"┌ pgtop · test — Top Queries ──────────────────────────────────────────────────────────────────────────────────────────┐"
+"│ Activity │ Locks │ Top Queries │ Replication │ Databases │ Tables │ Waits                                            │"
+"│ TPS: — ─────────────────────────────── Active: — ───────────────────────────── Cache hit: — ─────────────────────────│"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│                                                                                                                      │"
+"│  pg_stat_statements extension is not installed.                                                                      │"
+"│                                                                                                                      │"
+"│  This tab tracks normalized query statistics — calls, total                                                          │"
+"│  time, mean time. To enable:                                                                                         │"
+"│                                                                                                                      │"
+"│    1. Add to postgresql.conf:                                                                                        │"
+"│       shared_preload_libraries = 'pg_stat_statements'                                                                │"
+"│                                                                                                                      │"
+"│    2. Restart Postgres.                                                                                              │"
+"│                                                                                                                      │"
+"│    3. In your database:                                                                                              │"
+"│       CREATE EXTENSION pg_stat_statements;                                                                           │"
+"│                                                                                                                      │"
+"│  For docker-compose: set `command:` with `-c shared_preload_libraries=...`                                           │"
+"│  and use /docker-entrypoint-initdb.d for CREATE EXTENSION on init.                                                   │"
+"│                                                                                                                      │"
+"│ q quit  ·  1234567 tabs  ·  ↑↓ move  ·  x/X export                                                                   │"
+"└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"

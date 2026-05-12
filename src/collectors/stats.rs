@@ -10,12 +10,13 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+use super::try_publish;
 use crate::db::{self, Stats};
 use crate::messages::UpdateMessage;
 
 pub async fn run_stats_collector(
     dsn: String,
-    tx: mpsc::UnboundedSender<UpdateMessage>,
+    tx: mpsc::Sender<UpdateMessage>,
     conn_idx: usize,
     cancel: CancellationToken,
     poll_interval: Duration,
@@ -82,9 +83,13 @@ pub async fn run_stats_collector(
                 cache_hit_pct: raw.cache_hit_pct,
             };
 
-            if tx
-                .send(UpdateMessage::Stats { conn_idx, snapshot })
-                .is_err()
+            if try_publish(
+                &tx,
+                UpdateMessage::Stats { conn_idx, snapshot },
+                "stats",
+                conn_idx,
+            )
+            .is_break()
             {
                 return;
             }

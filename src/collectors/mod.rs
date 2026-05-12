@@ -2,6 +2,7 @@
 //! `mpsc` channel. Each collector lives in its own submodule with a single
 //! `run_*_collector` entry point.
 
+use std::ops::ControlFlow;
 use std::time::Duration;
 
 use tokio::{
@@ -13,6 +14,30 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::{self, DbError};
 use crate::messages::UpdateMessage;
+
+/// Publish to the bounded update channel without blocking. On `Closed`
+/// the caller should bail out — the UI is gone. On `Full` we drop the
+/// message and log it: the UI is slow to drain, but we'd rather skip a
+/// snapshot than hold the Postgres connection idle on `send().await`.
+pub(crate) fn try_publish(
+    tx: &mpsc::Sender<UpdateMessage>,
+    msg: UpdateMessage,
+    name: &'static str,
+    conn_idx: usize,
+) -> ControlFlow<()> {
+    match tx.try_send(msg) {
+        Ok(()) => ControlFlow::Continue(()),
+        Err(mpsc::error::TrySendError::Closed(_)) => ControlFlow::Break(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                collector = name,
+                conn_idx,
+                "update channel full, dropping message"
+            );
+            ControlFlow::Continue(())
+        }
+    }
+}
 
 pub mod activity;
 pub mod databases;
@@ -40,7 +65,7 @@ pub use top_queries::run_top_queries_collector;
 pub async fn run_simple_collector<F, T>(
     name: &'static str,
     dsn: String,
-    tx: mpsc::UnboundedSender<UpdateMessage>,
+    tx: mpsc::Sender<UpdateMessage>,
     conn_idx: usize,
     cancel: CancellationToken,
     poll_interval: Duration,
@@ -80,7 +105,7 @@ pub async fn run_simple_collector<F, T>(
 
             match result {
                 Ok(snapshot) => {
-                    if tx.send(wrap(conn_idx, snapshot)).is_err() {
+                    if try_publish(&tx, wrap(conn_idx, snapshot), name, conn_idx).is_break() {
                         return;
                     }
                 }

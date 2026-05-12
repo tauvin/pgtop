@@ -7,8 +7,8 @@
 use chrono::{DateTime, TimeZone, Utc};
 use ratatui::{Terminal, backend::TestBackend};
 
-use crate::app::{App, ConnectionState, Mode, Tab};
-use crate::db::{Backend, DatabaseStat, Lock, TableStat};
+use crate::app::{App, ConnectionState, Mode, Tab, WaitRow};
+use crate::db::{Backend, DatabaseStat, Lock, Replica, TableStat, TopQueriesSnapshot, TopQuery};
 use crate::ui;
 
 const WIDTH: u16 = 120;
@@ -231,6 +231,107 @@ fn confirm_terminate_popup_partial_typing() {
     let mut app = make_app(conn);
     app.current_tab = Tab::Activity;
     app.mode = Mode::ConfirmTerminate(505, "ye".to_string());
+
+    insta::assert_snapshot!(render_snapshot(&mut app));
+}
+
+#[test]
+fn top_queries_tab_available() {
+    let mut conn = make_conn();
+    conn.set_top_queries(TopQueriesSnapshot::Available(vec![
+        TopQuery {
+            query: "SELECT * FROM orders WHERE created_at > now() - interval '1 day'".to_string(),
+            calls: 12_345,
+            total_exec_time_ms: 56_789.12,
+            mean_exec_time_ms: 4.6,
+            rows: 9_876_543,
+        },
+        TopQuery {
+            query: "UPDATE accounts SET balance = balance - $1 WHERE id = $2".to_string(),
+            calls: 4_321,
+            total_exec_time_ms: 8_765.4,
+            mean_exec_time_ms: 2.03,
+            rows: 4_321,
+        },
+    ]));
+    let mut app = make_app(conn);
+    app.current_tab = Tab::TopQueries;
+
+    insta::assert_snapshot!(render_snapshot(&mut app));
+}
+
+#[test]
+fn top_queries_tab_extension_missing() {
+    let mut conn = make_conn();
+    conn.set_top_queries(TopQueriesSnapshot::ExtensionMissing);
+    let mut app = make_app(conn);
+    app.current_tab = Tab::TopQueries;
+
+    insta::assert_snapshot!(render_snapshot(&mut app));
+}
+
+#[test]
+fn replication_tab_with_two_replicas() {
+    let mut conn = make_conn();
+    conn.set_replication(vec![
+        Replica {
+            pid: 9001,
+            application_name: Some("walreceiver-1".to_string()),
+            client_addr: Some("10.0.0.20".to_string()),
+            state: Some("streaming".to_string()),
+            sync_state: Some("sync".to_string()),
+            replay_lag_secs: Some(0.123),
+            sent_lsn: Some("0/3000028".to_string()),
+            replay_lsn: Some("0/3000020".to_string()),
+        },
+        Replica {
+            pid: 9002,
+            application_name: Some("walreceiver-2".to_string()),
+            client_addr: Some("10.0.0.21".to_string()),
+            state: Some("streaming".to_string()),
+            sync_state: Some("async".to_string()),
+            replay_lag_secs: Some(2.5),
+            sent_lsn: Some("0/3000028".to_string()),
+            replay_lsn: Some("0/2FFFFF8".to_string()),
+        },
+    ]);
+    let mut app = make_app(conn);
+    app.current_tab = Tab::Replication;
+
+    insta::assert_snapshot!(render_snapshot(&mut app));
+}
+
+#[test]
+fn waits_tab_with_aggregated_rows() {
+    let mut conn = make_conn();
+    conn.waits = vec![
+        WaitRow {
+            wait_event_type: "Lock".to_string(),
+            wait_event: "relation".to_string(),
+            count: 17,
+        },
+        WaitRow {
+            wait_event_type: "Client".to_string(),
+            wait_event: "ClientRead".to_string(),
+            count: 8,
+        },
+        WaitRow {
+            wait_event_type: "IO".to_string(),
+            wait_event: "DataFileRead".to_string(),
+            count: 3,
+        },
+    ];
+    let mut app = make_app(conn);
+    app.current_tab = Tab::Waits;
+
+    insta::assert_snapshot!(render_snapshot(&mut app));
+}
+
+#[test]
+fn replay_indicator_in_title_bar() {
+    let conn = make_conn();
+    let mut app = make_app(conn);
+    app.is_replay = true;
 
     insta::assert_snapshot!(render_snapshot(&mut app));
 }

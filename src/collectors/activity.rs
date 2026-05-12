@@ -10,13 +10,14 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+use super::try_publish;
 use crate::app::ConnectionStatus;
 use crate::db;
 use crate::messages::UpdateMessage;
 
 pub async fn run_activity_collector(
     dsn: String,
-    tx: mpsc::UnboundedSender<UpdateMessage>,
+    tx: mpsc::Sender<UpdateMessage>,
     conn_idx: usize,
     cancel: CancellationToken,
     poll_interval: Duration,
@@ -24,7 +25,9 @@ pub async fn run_activity_collector(
     'outer: loop {
         let tx_for_status = tx.clone();
         let client = match db::connect_with_backoff(&dsn, &cancel, move |attempt| {
-            let _ = tx_for_status.send(UpdateMessage::Status {
+            // Status updates are tiny and rare — try_send is fine; if
+            // the buffer is somehow full the UI will see the next one.
+            let _ = tx_for_status.try_send(UpdateMessage::Status {
                 conn_idx,
                 status: ConnectionStatus::Connecting { attempt },
             });
@@ -35,12 +38,16 @@ pub async fn run_activity_collector(
             None => return,
         };
 
-        if tx
-            .send(UpdateMessage::Status {
+        if try_publish(
+            &tx,
+            UpdateMessage::Status {
                 conn_idx,
                 status: ConnectionStatus::Connected,
-            })
-            .is_err()
+            },
+            "activity",
+            conn_idx,
+        )
+        .is_break()
         {
             return;
         }
@@ -67,9 +74,13 @@ pub async fn run_activity_collector(
 
             match result {
                 Ok(snapshot) => {
-                    if tx
-                        .send(UpdateMessage::Activity { conn_idx, snapshot })
-                        .is_err()
+                    if try_publish(
+                        &tx,
+                        UpdateMessage::Activity { conn_idx, snapshot },
+                        "activity",
+                        conn_idx,
+                    )
+                    .is_break()
                     {
                         return;
                     }

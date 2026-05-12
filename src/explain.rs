@@ -37,11 +37,15 @@ pub async fn run_explain(
     dsn: String,
     query: String,
     conn_idx: usize,
-    tx: mpsc::UnboundedSender<UpdateMessage>,
+    tx: mpsc::Sender<UpdateMessage>,
     cancel: CancellationToken,
 ) {
     let plan = explain(&dsn, &query, &cancel).await;
-    let _ = tx.send(UpdateMessage::ExplainResult { conn_idx, plan });
+    // EXPLAIN result is one-shot per popup; await is OK and avoids the
+    // user seeing a stuck "Loading…" if the channel is momentarily full.
+    let _ = tx
+        .send(UpdateMessage::ExplainResult { conn_idx, plan })
+        .await;
 }
 
 async fn explain(dsn: &str, query: &str, cancel: &CancellationToken) -> Result<String, String> {

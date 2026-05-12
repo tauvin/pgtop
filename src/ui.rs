@@ -155,13 +155,19 @@ fn title_for(app: &App, now: DateTime<Utc>) -> String {
 }
 
 fn build_prefix(app: &App) -> String {
-    let mut prefix = String::from("pgtop");
+    let mut prefix = String::from(if app.is_replay {
+        "pgtop · REPLAY"
+    } else {
+        "pgtop"
+    });
     let conn = app.active();
     if let Some(profile) = &conn.profile_name {
         prefix.push_str(" · ");
         prefix.push_str(profile);
     }
-    if conn.read_only {
+    if conn.read_only && !app.is_replay {
+        // "RO" + "REPLAY" together would be visual noise — replay is
+        // implicitly read-only.
         prefix.push_str(" · RO");
     }
     let total = app.connections.len();

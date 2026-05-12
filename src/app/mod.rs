@@ -49,6 +49,11 @@ pub struct App {
     /// `App` so any mode transition (close_modal, set_active, mode change)
     /// can abort the task without leaving it running silently.
     pub explain_cancel: Option<CancellationToken>,
+
+    /// True when the app is showing a session file rather than a live
+    /// connection. Disables EXPLAIN (no live DB), cancel/terminate, and
+    /// is reflected in the title bar.
+    pub is_replay: bool,
 }
 
 impl App {
@@ -65,6 +70,7 @@ impl App {
             current_tab: Tab::Activity,
             theme: crate::theme::Theme::default(),
             explain_cancel: None,
+            is_replay: false,
         }
     }
 

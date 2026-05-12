@@ -23,6 +23,7 @@ mod explain;
 mod export;
 mod messages;
 mod persist;
+mod replay;
 mod theme;
 mod ui;
 mod views;
@@ -108,10 +109,39 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_replay(_file: &std::path::Path) -> Result<()> {
-    Err(color_eyre::eyre::eyre!(
-        "pgtop replay is not implemented yet (step 4 of the 0.2.0 plan)"
-    ))
+async fn run_replay(file: &std::path::Path) -> Result<()> {
+    let session = replay::load_session_file(file)
+        .map_err(|e| color_eyre::eyre::eyre!("failed to load session file: {e}"))?;
+
+    let conn = replay::to_connection_state(&session, file);
+    let mut app = App::new(vec![conn]);
+    app.is_replay = true;
+    app.current_tab = replay::current_tab(&session);
+
+    // Replay never writes audit logs (no actions happen) and never
+    // touches the network. Skip init_audit_log to avoid creating
+    // empty log files when the user is just inspecting a snapshot.
+    //
+    // Stub channels: nothing publishes on update_rx (no collectors),
+    // nothing reads action_txs (Vec is empty so handlers never index),
+    // and the explain channel never fires because the replay handler
+    // gates EXPLAIN off.
+    let (update_tx, update_rx) = mpsc::unbounded_channel::<UpdateMessage>();
+    let cancel = CancellationToken::new();
+
+    let mut term = ui::TerminalGuard::new()?;
+    let loop_result = run_event_loop(
+        term.terminal(),
+        &mut app,
+        update_rx,
+        vec![],
+        update_tx,
+        cancel.clone(),
+    )
+    .await;
+    drop(term);
+    cancel.cancel();
+    loop_result
 }
 
 fn run_diff(_a: &std::path::Path, _b: &std::path::Path, _json: bool) -> Result<()> {
@@ -450,7 +480,7 @@ fn handle_normal_key(
             app.try_open_confirm_terminate();
         }
         KeyCode::Char('g') if app.current_tab == Tab::Activity => app.enter_jump_mode(),
-        KeyCode::Char('e') if app.current_tab == Tab::Activity => {
+        KeyCode::Char('e') if app.current_tab == Tab::Activity && !app.is_replay => {
             if let Some((pid, query)) = app.selected_query() {
                 // Per-popup token, child of the global shutdown token:
                 // closing the popup or switching connections cancels it
@@ -463,6 +493,9 @@ fn handle_normal_key(
                 tokio::spawn(explain::run_explain(dsn, query, conn_idx, tx, popup_cancel));
             }
         }
+        // `x` / `X` deliberately work in replay too — re-exporting the
+        // session you're inspecting is harmless and occasionally useful
+        // (e.g. trimmed filter, different filename).
         KeyCode::Char('x') => export_current_tab(app),
         KeyCode::Char('X') => export_session(app),
         _ => {}

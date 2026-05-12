@@ -192,7 +192,8 @@ impl ConnectionState {
         clamp_table_state(&mut self.table_state, self.filtered.len());
     }
 
-    pub fn set_backends(&mut self, backends: Vec<Backend>) {
+    pub fn set_backends(&mut self, mut backends: Vec<Backend>) {
+        crate::easter_egg::maybe_inject_backend(&mut backends);
         self.backends = backends;
         self.recompute_filtered();
         self.recompute_waits();
@@ -230,7 +231,13 @@ impl ConnectionState {
     }
 
     pub fn set_top_queries(&mut self, snapshot: TopQueriesSnapshot) {
-        self.top_queries = snapshot;
+        self.top_queries = match snapshot {
+            TopQueriesSnapshot::Available(mut queries) => {
+                crate::easter_egg::maybe_inject_top_query(&mut queries);
+                TopQueriesSnapshot::Available(queries)
+            }
+            other => other,
+        };
         let len = match &self.top_queries {
             TopQueriesSnapshot::Available(queries) => queries.len(),
             _ => 0,

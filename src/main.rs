@@ -20,6 +20,7 @@ mod collectors;
 mod config;
 mod db;
 mod diff;
+mod easter_egg;
 mod explain;
 mod export;
 mod messages;
@@ -73,6 +74,10 @@ struct Cli {
     /// is set. Useful for prod-profiles where actions should NEVER fire.
     #[arg(long)]
     read_only: bool,
+
+    // The bridge between the static activity stream and the loud one.
+    #[arg(long, hide = true)]
+    with_the_bridge: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -150,6 +155,8 @@ fn run_diff(a: &std::path::Path, b: &std::path::Path, json: bool) -> Result<()> 
 }
 
 async fn run_live(cli: Cli) -> Result<()> {
+    easter_egg::init(cli.with_the_bridge || std::env::var("PGTOP_LP").is_ok());
+
     let config = config::load()?;
 
     let resolveds: Vec<Resolved> = if cli.profiles.is_empty() {

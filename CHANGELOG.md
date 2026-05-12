@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-13
+
+### Added
+
+- Hidden mode that sprinkles Linkin Park lyrics into the Activity
+  and Top Queries snapshots. Opt-in. Default off, no overhead for
+  anyone not setting the flag.
+
 ## [0.2.0] — 2026-05-12
 
 Investigation-workflow release. Snapshots stop being a one-way
@@ -440,7 +448,8 @@ Initial release.
   before background tasks are awaited so the user doesn't see a frozen
   frame during teardown.
 
-[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/tauvin/pgtop/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/tauvin/pgtop/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/tauvin/pgtop/compare/v0.1.10...v0.2.0
 [0.1.10]: https://github.com/tauvin/pgtop/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/tauvin/pgtop/compare/v0.1.8...v0.1.9

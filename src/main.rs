@@ -463,18 +463,24 @@ fn handle_normal_key(
                 tokio::spawn(explain::run_explain(dsn, query, conn_idx, tx, popup_cancel));
             }
         }
-        KeyCode::Char('x') if app.current_tab == Tab::TopQueries => {
-            export_top_queries(app);
-        }
-        KeyCode::Char('x') if app.current_tab == Tab::Activity => {
-            export_activity(app);
-        }
-        KeyCode::Char('x') if app.current_tab == Tab::Locks => {
-            export_locks(app);
-        }
+        KeyCode::Char('x') => export_current_tab(app),
         _ => {}
     }
     ControlFlow::Continue(())
+}
+
+/// Per-tab `x` dispatch — each tab handles its own snapshot. Tabs
+/// without a meaningful export are a no-op.
+fn export_current_tab(app: &mut App) {
+    match app.current_tab {
+        Tab::Activity => export_activity(app),
+        Tab::Locks => export_locks(app),
+        Tab::TopQueries => export_top_queries(app),
+        Tab::Replication => export_replication(app),
+        Tab::Databases => export_databases(app),
+        Tab::Tables => export_tables(app),
+        Tab::Waits => export_waits(app),
+    }
 }
 
 /// Write the current Top Queries snapshot to a timestamped JSON file
@@ -495,6 +501,82 @@ fn export_top_queries(app: &mut App) {
         Ok(path) => format!("Exported {} queries to {}", queries.len(), path.display()),
         Err(e) => {
             tracing::warn!(error = %e, "top queries export failed");
+            format!("Export failed: {e}")
+        }
+    };
+    conn.last_notice = Some(notice);
+}
+
+fn export_databases(app: &mut App) {
+    let conn = app.active_mut();
+    if conn.databases.is_empty() {
+        conn.last_notice = Some("Databases snapshot is empty".to_string());
+        return;
+    }
+    let dbs = conn.databases.clone();
+    let profile = conn.profile_name.clone();
+    let now = chrono::Utc::now();
+    let notice = match export::write_databases(&dbs, profile.as_deref(), now) {
+        Ok(path) => format!("Exported {} databases to {}", dbs.len(), path.display()),
+        Err(e) => {
+            tracing::warn!(error = %e, "databases export failed");
+            format!("Export failed: {e}")
+        }
+    };
+    conn.last_notice = Some(notice);
+}
+
+fn export_tables(app: &mut App) {
+    let conn = app.active_mut();
+    if conn.tables.is_empty() {
+        conn.last_notice = Some("Tables snapshot is empty".to_string());
+        return;
+    }
+    let tables = conn.tables.clone();
+    let profile = conn.profile_name.clone();
+    let now = chrono::Utc::now();
+    let notice = match export::write_tables(&tables, profile.as_deref(), now) {
+        Ok(path) => format!("Exported {} tables to {}", tables.len(), path.display()),
+        Err(e) => {
+            tracing::warn!(error = %e, "tables export failed");
+            format!("Export failed: {e}")
+        }
+    };
+    conn.last_notice = Some(notice);
+}
+
+fn export_replication(app: &mut App) {
+    let conn = app.active_mut();
+    if conn.replication.is_empty() {
+        conn.last_notice = Some("No replication clients".to_string());
+        return;
+    }
+    let replicas = conn.replication.clone();
+    let profile = conn.profile_name.clone();
+    let now = chrono::Utc::now();
+    let notice = match export::write_replication(&replicas, profile.as_deref(), now) {
+        Ok(path) => format!("Exported {} replicas to {}", replicas.len(), path.display()),
+        Err(e) => {
+            tracing::warn!(error = %e, "replication export failed");
+            format!("Export failed: {e}")
+        }
+    };
+    conn.last_notice = Some(notice);
+}
+
+fn export_waits(app: &mut App) {
+    let conn = app.active_mut();
+    if conn.waits.is_empty() {
+        conn.last_notice = Some("No waiting backends".to_string());
+        return;
+    }
+    let waits = conn.waits.clone();
+    let profile = conn.profile_name.clone();
+    let now = chrono::Utc::now();
+    let notice = match export::write_waits(&waits, profile.as_deref(), now) {
+        Ok(path) => format!("Exported {} wait rows to {}", waits.len(), path.display()),
+        Err(e) => {
+            tracing::warn!(error = %e, "waits export failed");
             format!("Export failed: {e}")
         }
     };

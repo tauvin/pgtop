@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::db::{Backend, Lock, TopQuery};
+use crate::app::WaitRow;
+use crate::db::{Backend, DatabaseStat, Lock, Replica, TableStat, TopQuery};
 
 /// One row in the exported JSON. `share_of_total_time_pct` is computed
 /// against the sum of `total_exec_time_ms` across the snapshot — the
@@ -100,6 +101,22 @@ pub fn activity_export_path(profile: Option<&str>, now: DateTime<Utc>) -> PathBu
 
 pub fn locks_export_path(profile: Option<&str>, now: DateTime<Utc>) -> PathBuf {
     timestamped_path("locks", profile, now)
+}
+
+pub fn databases_export_path(profile: Option<&str>, now: DateTime<Utc>) -> PathBuf {
+    timestamped_path("databases", profile, now)
+}
+
+pub fn tables_export_path(profile: Option<&str>, now: DateTime<Utc>) -> PathBuf {
+    timestamped_path("tables", profile, now)
+}
+
+pub fn replication_export_path(profile: Option<&str>, now: DateTime<Utc>) -> PathBuf {
+    timestamped_path("replication", profile, now)
+}
+
+pub fn waits_export_path(profile: Option<&str>, now: DateTime<Utc>) -> PathBuf {
+    timestamped_path("waits", profile, now)
 }
 
 /// Write the snapshot to disk, creating the export dir if needed.
@@ -305,6 +322,268 @@ pub fn write_locks(
     Ok(path)
 }
 
+/// One row in the Databases export. The collector-derived `tps` is
+/// included; total/rollback counters are cumulative since the last
+/// `pg_stat_reset()`.
+#[derive(Serialize)]
+struct ExportedDatabase<'a> {
+    datname: &'a str,
+    numbackends: i32,
+    /// Computed by the databases collector from the delta between
+    /// consecutive snapshots; `None` for the first sample after a
+    /// (re)connect.
+    tps: Option<f64>,
+    xact_commit: i64,
+    xact_rollback: i64,
+    blks_hit: i64,
+    blks_read: i64,
+    cache_hit_pct: f64,
+    temp_bytes: i64,
+    deadlocks: i64,
+}
+
+#[derive(Serialize)]
+struct DatabasesExport<'a> {
+    generated_at: DateTime<Utc>,
+    profile: Option<&'a str>,
+    exported_count: usize,
+    databases: Vec<ExportedDatabase<'a>>,
+}
+
+pub fn render_databases_json(
+    dbs: &[DatabaseStat],
+    profile: Option<&str>,
+    now: DateTime<Utc>,
+) -> serde_json::Result<String> {
+    let exported: Vec<ExportedDatabase<'_>> = dbs
+        .iter()
+        .map(|d| ExportedDatabase {
+            datname: &d.datname,
+            numbackends: d.numbackends,
+            tps: d.tps,
+            xact_commit: d.xact_commit,
+            xact_rollback: d.xact_rollback,
+            blks_hit: d.blks_hit,
+            blks_read: d.blks_read,
+            cache_hit_pct: d.cache_hit_pct(),
+            temp_bytes: d.temp_bytes,
+            deadlocks: d.deadlocks,
+        })
+        .collect();
+    let export = DatabasesExport {
+        generated_at: now,
+        profile,
+        exported_count: exported.len(),
+        databases: exported,
+    };
+    serde_json::to_string_pretty(&export)
+}
+
+pub fn write_databases(
+    dbs: &[DatabaseStat],
+    profile: Option<&str>,
+    now: DateTime<Utc>,
+) -> std::io::Result<PathBuf> {
+    let body = render_databases_json(dbs, profile, now)
+        .map_err(|e| std::io::Error::other(format!("serialise databases: {e}")))?;
+    let dir = export_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = databases_export_path(profile, now);
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+/// One row in the Tables export. `dead_pct` is materialised so the
+/// reader doesn't have to recompute it from live/dead tuples.
+#[derive(Serialize)]
+struct ExportedTable<'a> {
+    schemaname: &'a str,
+    relname: &'a str,
+    n_live_tup: i64,
+    n_dead_tup: i64,
+    dead_pct: Option<f64>,
+    last_vacuum: Option<DateTime<Utc>>,
+    last_analyze: Option<DateTime<Utc>>,
+    seq_scan: i64,
+    idx_scan: i64,
+}
+
+#[derive(Serialize)]
+struct TablesExport<'a> {
+    generated_at: DateTime<Utc>,
+    profile: Option<&'a str>,
+    exported_count: usize,
+    tables: Vec<ExportedTable<'a>>,
+}
+
+pub fn render_tables_json(
+    tables: &[TableStat],
+    profile: Option<&str>,
+    now: DateTime<Utc>,
+) -> serde_json::Result<String> {
+    let exported: Vec<ExportedTable<'_>> = tables
+        .iter()
+        .map(|t| ExportedTable {
+            schemaname: &t.schemaname,
+            relname: &t.relname,
+            n_live_tup: t.n_live_tup,
+            n_dead_tup: t.n_dead_tup,
+            dead_pct: t.dead_pct(),
+            last_vacuum: t.last_vacuum,
+            last_analyze: t.last_analyze,
+            seq_scan: t.seq_scan,
+            idx_scan: t.idx_scan,
+        })
+        .collect();
+    let export = TablesExport {
+        generated_at: now,
+        profile,
+        exported_count: exported.len(),
+        tables: exported,
+    };
+    serde_json::to_string_pretty(&export)
+}
+
+pub fn write_tables(
+    tables: &[TableStat],
+    profile: Option<&str>,
+    now: DateTime<Utc>,
+) -> std::io::Result<PathBuf> {
+    let body = render_tables_json(tables, profile, now)
+        .map_err(|e| std::io::Error::other(format!("serialise tables: {e}")))?;
+    let dir = export_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = tables_export_path(profile, now);
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+#[derive(Serialize)]
+struct ExportedReplica<'a> {
+    pid: i32,
+    application_name: Option<&'a str>,
+    client_addr: Option<&'a str>,
+    state: Option<&'a str>,
+    sync_state: Option<&'a str>,
+    replay_lag_secs: Option<f64>,
+    sent_lsn: Option<&'a str>,
+    replay_lsn: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct ReplicationExport<'a> {
+    generated_at: DateTime<Utc>,
+    profile: Option<&'a str>,
+    exported_count: usize,
+    replicas: Vec<ExportedReplica<'a>>,
+}
+
+pub fn render_replication_json(
+    replicas: &[Replica],
+    profile: Option<&str>,
+    now: DateTime<Utc>,
+) -> serde_json::Result<String> {
+    let exported: Vec<ExportedReplica<'_>> = replicas
+        .iter()
+        .map(|r| ExportedReplica {
+            pid: r.pid,
+            application_name: r.application_name.as_deref(),
+            client_addr: r.client_addr.as_deref(),
+            state: r.state.as_deref(),
+            sync_state: r.sync_state.as_deref(),
+            replay_lag_secs: r.replay_lag_secs,
+            sent_lsn: r.sent_lsn.as_deref(),
+            replay_lsn: r.replay_lsn.as_deref(),
+        })
+        .collect();
+    let export = ReplicationExport {
+        generated_at: now,
+        profile,
+        exported_count: exported.len(),
+        replicas: exported,
+    };
+    serde_json::to_string_pretty(&export)
+}
+
+pub fn write_replication(
+    replicas: &[Replica],
+    profile: Option<&str>,
+    now: DateTime<Utc>,
+) -> std::io::Result<PathBuf> {
+    let body = render_replication_json(replicas, profile, now)
+        .map_err(|e| std::io::Error::other(format!("serialise replication: {e}")))?;
+    let dir = export_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = replication_export_path(profile, now);
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+#[derive(Serialize)]
+struct ExportedWait<'a> {
+    wait_event_type: &'a str,
+    wait_event: &'a str,
+    count: u32,
+    /// Share of all waiters in this snapshot. The Top Queries export
+    /// has the same shape — it's the first thing you want to know.
+    share_pct: f64,
+}
+
+#[derive(Serialize)]
+struct WaitsExport<'a> {
+    generated_at: DateTime<Utc>,
+    profile: Option<&'a str>,
+    /// Sum of `count` across all rows — the number of backends in a
+    /// non-trivial wait state at snapshot time.
+    waiting_total: u32,
+    exported_count: usize,
+    waits: Vec<ExportedWait<'a>>,
+}
+
+pub fn render_waits_json(
+    waits: &[WaitRow],
+    profile: Option<&str>,
+    now: DateTime<Utc>,
+) -> serde_json::Result<String> {
+    let waiting_total: u32 = waits.iter().map(|w| w.count).sum();
+    let total_f = waiting_total as f64;
+    let exported: Vec<ExportedWait<'_>> = waits
+        .iter()
+        .map(|w| ExportedWait {
+            wait_event_type: &w.wait_event_type,
+            wait_event: &w.wait_event,
+            count: w.count,
+            share_pct: if total_f > 0.0 {
+                100.0 * w.count as f64 / total_f
+            } else {
+                0.0
+            },
+        })
+        .collect();
+    let export = WaitsExport {
+        generated_at: now,
+        profile,
+        waiting_total,
+        exported_count: exported.len(),
+        waits: exported,
+    };
+    serde_json::to_string_pretty(&export)
+}
+
+pub fn write_waits(
+    waits: &[WaitRow],
+    profile: Option<&str>,
+    now: DateTime<Utc>,
+) -> std::io::Result<PathBuf> {
+    let body = render_waits_json(waits, profile, now)
+        .map_err(|e| std::io::Error::other(format!("serialise waits: {e}")))?;
+    let dir = export_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = waits_export_path(profile, now);
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,5 +772,79 @@ mod tests {
         let json = render_locks_json(&locks, None, now).unwrap();
         assert!(json.contains("\"object\": null"));
         assert!(json.contains("\"locktype\": \"transactionid\""));
+    }
+
+    #[test]
+    fn databases_export_materialises_cache_hit_pct() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 10, 0, 0).unwrap();
+        let dbs = vec![DatabaseStat {
+            datname: "app".into(),
+            numbackends: 5,
+            xact_commit: 1000,
+            xact_rollback: 10,
+            blks_hit: 99,
+            blks_read: 1,
+            temp_bytes: 0,
+            deadlocks: 0,
+            tps: Some(42.0),
+        }];
+        let json = render_databases_json(&dbs, Some("prod"), now).unwrap();
+        assert!(json.contains("\"cache_hit_pct\": 99.0"));
+        assert!(json.contains("\"tps\": 42.0"));
+        assert!(json.contains("\"exported_count\": 1"));
+    }
+
+    #[test]
+    fn tables_export_includes_dead_pct() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 10, 0, 0).unwrap();
+        let tables = vec![TableStat {
+            schemaname: "public".into(),
+            relname: "orders".into(),
+            n_live_tup: 80,
+            n_dead_tup: 20,
+            last_vacuum: None,
+            last_analyze: None,
+            seq_scan: 1,
+            idx_scan: 100,
+        }];
+        let json = render_tables_json(&tables, None, now).unwrap();
+        assert!(json.contains("\"dead_pct\": 20.0"));
+        assert!(json.contains("\"relname\": \"orders\""));
+    }
+
+    #[test]
+    fn waits_export_computes_share() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 10, 0, 0).unwrap();
+        let waits = vec![
+            WaitRow {
+                wait_event_type: "Lock".into(),
+                wait_event: "relation".into(),
+                count: 30,
+            },
+            WaitRow {
+                wait_event_type: "Client".into(),
+                wait_event: "ClientRead".into(),
+                count: 10,
+            },
+        ];
+        let json = render_waits_json(&waits, Some("prod"), now).unwrap();
+        assert!(json.contains("\"share_pct\": 75.0"));
+        assert!(json.contains("\"share_pct\": 25.0"));
+        assert!(json.contains("\"waiting_total\": 40"));
+    }
+
+    #[test]
+    fn waits_export_handles_zero_waiters() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 10, 0, 0).unwrap();
+        let json = render_waits_json(&[], None, now).unwrap();
+        assert!(json.contains("\"waiting_total\": 0"));
+        assert!(json.contains("\"exported_count\": 0"));
+    }
+
+    #[test]
+    fn replication_export_handles_empty() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 10, 0, 0).unwrap();
+        let json = render_replication_json(&[], None, now).unwrap();
+        assert!(json.contains("\"exported_count\": 0"));
     }
 }
